@@ -169,3 +169,39 @@
   }
 }
 
+
+/* Premium ERP visual refinement */
+.nav-item {
+  border-radius: 10px;
+  transition: background .2s ease, color .2s ease;
+}
+
+.nav-item:hover {
+  background: rgba(39,131,77,.07);
+}
+
+.nav-item.active {
+  border-radius: 10px;
+  font-weight: 600;
+}
+
+.module-card {
+  border-radius: 14px;
+  transition: transform .2s ease, box-shadow .2s ease;
+}
+
+.module-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 7px 22px rgba(30,60,40,.08);
+}
+
+input, select, textarea {
+  transition: border-color .2s ease, box-shadow .2s ease;
+}
+
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: #27834d;
+  box-shadow: 0 0 0 3px rgba(39,131,77,.09);
+}
+
