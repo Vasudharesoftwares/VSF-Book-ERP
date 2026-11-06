@@ -74,3 +74,98 @@
 .custom-field-info small{font-size:11px;color:#87938b;margin-top:4px;overflow-wrap:anywhere}
 .custom-field-disabled{opacity:.55}
 @media(max-width:520px){.custom-field-row{gap:8px}.custom-field-row .secondary-action{padding:8px;font-size:11px}}
+
+/* Apple-inspired Create Field styling */
+.custom-field-form {
+  background: #fff;
+  border: 1px solid #e9ece9;
+  border-radius: 16px;
+  padding: 22px;
+  box-shadow: 0 4px 18px rgba(25,45,30,.045);
+}
+
+.custom-field-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  width: 100%;
+}
+
+.custom-field-group {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.custom-field-group label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #303b33;
+}
+
+.custom-field-group input,
+.custom-field-group select {
+  width: 100%;
+  height: 52px;
+  box-sizing: border-box;
+  padding: 0 15px;
+  background: #f7f8f7;
+  border: 1px solid #e4e8e4;
+  border-radius: 11px;
+  color: #26332a;
+  font-size: 14px;
+  outline: none;
+  transition: .2s ease;
+}
+
+.custom-field-group input:focus,
+.custom-field-group select:focus {
+  background: #fff;
+  border-color: #27834d;
+  box-shadow: 0 0 0 3px rgba(39,131,77,.10);
+}
+
+.custom-field-group input::placeholder {
+  color: #9a9f9b;
+}
+
+.custom-field-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 18px;
+}
+
+.custom-field-actions button {
+  min-height: 43px;
+  padding: 0 22px;
+  border: none;
+  border-radius: 10px;
+  background: #27834d;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: .2s ease;
+}
+
+.custom-field-actions button:hover {
+  background: #206b3e;
+}
+
+.custom-field-actions button:active {
+  transform: scale(.98);
+}
+
+@media (max-width: 600px) {
+  .custom-field-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .custom-field-group {
+    width: 100%;
+  }
+}
+
