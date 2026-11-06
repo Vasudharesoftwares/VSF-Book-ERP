@@ -205,3 +205,48 @@ input:focus, select:focus, textarea:focus {
   box-shadow: 0 0 0 3px rgba(39,131,77,.09);
 }
 
+
+/* Gentle Adjust Stock form refinement */
+.adjust-form input,
+.adjust-form select,
+.adjust-form textarea,
+.stock-adjustment input,
+.stock-adjustment select,
+.stock-adjustment textarea {
+  min-height: 50px;
+  padding: 12px 14px;
+  border: 1px solid #e2e7e3;
+  border-radius: 10px;
+  background: #f8faf9;
+  font-size: 14px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.adjust-form input:focus,
+.adjust-form select:focus,
+.stock-adjustment input:focus,
+.stock-adjustment select:focus {
+  outline: none;
+  border-color: #80ae91;
+  box-shadow: 0 0 0 3px rgba(48, 125, 77, 0.08);
+}
+
+
+/* Purchase module */
+.purchase-module{width:100%;min-width:0}
+.purchase-tabs{display:flex;gap:7px;flex-wrap:wrap;margin:20px 0}
+.purchase-tab{display:inline-flex;align-items:center;gap:7px;padding:10px 13px;border:1px solid var(--border);border-radius:8px;background:#fff;color:#536258;font-size:12px;font-weight:600;cursor:pointer}
+.purchase-tab.active{background:#eaf5ed;border-color:#b9d9c2;color:#176b3d}
+.purchase-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:18px 0}
+.purchase-toolbar h2{font-size:16px;margin:0 0 5px}
+.purchase-toolbar p,.purchase-hint{font-size:12px;color:#78867d;margin:0}
+.purchase-form-actions{display:flex;gap:9px;margin-top:18px;flex-wrap:wrap}
+.purchase-loading{font-size:12px;color:#718078}
+.purchase-status{display:inline-block;padding:4px 8px;border-radius:20px;background:#fff4e5;color:#94600b;font-size:11px;font-weight:600}
+.purchase-status.good{background:#eaf5ed;color:#176b3d}
+.purchase-module .data-panel{overflow-x:auto}
+.purchase-module .erp-table{min-width:680px}
+.purchase-module .form-grid input,.purchase-module .form-grid select{width:100%;min-width:0;box-sizing:border-box;border:1px solid #dce5df;border-radius:7px;padding:10px;background:#fff;color:#25372c;font:inherit;font-size:13px}
+.purchase-module .form-grid input:focus,.purchase-module .form-grid select:focus{outline:2px solid #b8ddc5;border-color:#21864e}
+.purchase-hint{margin-top:14px}
+@media(max-width:600px){.purchase-toolbar{align-items:flex-start;flex-direction:column}.purchase-tabs{gap:6px}.purchase-tab{font-size:11px;padding:8px 10px}}

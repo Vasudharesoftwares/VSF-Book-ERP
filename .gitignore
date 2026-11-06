@@ -26,3 +26,13 @@ __pycache__/
 node_modules/
 dist/
 .DS_Store
+
+# Local ERP databases, backups and patch snapshots
+backups/
+*.bak
+*.backup*
+*.before_*
+*.pre-repair-backup
+*.repair*-backup
+*-backup
+purchase-module-context.txt

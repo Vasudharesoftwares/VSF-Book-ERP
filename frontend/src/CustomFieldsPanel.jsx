@@ -13,7 +13,7 @@ const types = [
  ["text","Text"],["long_text","Long text"],["number","Whole number"],
  ["decimal","Decimal"],["date","Date"],["dropdown","Dropdown"],
  ["multi_select","Multi-select"],["checkbox","Checkbox"],
- ["email","Email"],["phone","Phone"]
+ ["email","Email"],["phone","Phone"],["product","Product selector"],["stock_quantity","Stock quantity"],["adjustment_reason","Adjustment reason"]
 ];
 
 export default function CustomFieldsPanel({tenant}) {
@@ -68,17 +68,16 @@ export default function CustomFieldsPanel({tenant}) {
   } catch(e) {setError(e.message);}
  }
 
+ async function saveOrder(next) {
+  await saveOrder(next);
+ }
+
  async function move(index, direction) {
   const next=[...fields];
   const target=index+direction;
   if(target<0||target>=next.length) return;
   [next[index],next[target]]=[next[target],next[index]];
-  setFields(next);
-  try {
-   await call("/custom-fields/reorder?module_key="+moduleKey,{
-    method:"PUT",body:JSON.stringify({field_ids:next.map(x=>x.id)})
-   });
-  } catch(e) {setError(e.message);await load();}
+  await saveOrder(next);
  }
 
  return <div className="custom-builder">
@@ -132,7 +131,22 @@ export default function CustomFieldsPanel({tenant}) {
    {busy?<p className="empty-state">Loading fields...</p>:fields.length===0?
     <p className="empty-state">No custom fields created for this module yet.</p>:
     <div className="custom-field-list">
-     {fields.map((field,index)=><div className={`custom-field-row ${field.is_active?"":"custom-field-disabled"}`} key={field.id}>
+     {fields.map((field,index)=><div
+      className={`custom-field-row ${field.is_active?"":"custom-field-disabled"}`}
+      key={field.id}
+      draggable
+      onDragStart={e=>e.dataTransfer.setData("text/plain",String(index))}
+      onDragOver={e=>e.preventDefault()}
+      onDrop={e=>{
+       e.preventDefault();
+       const from=Number(e.dataTransfer.getData("text/plain"));
+       if(!Number.isInteger(from)||from===index||from<0||from>=fields.length)return;
+       const next=[...fields];
+       const [picked]=next.splice(from,1);
+       next.splice(index,0,picked);
+       saveOrder(next);
+      }}
+     >
       <div className="custom-field-order">
        <button type="button" title="Move up" disabled={index===0} onClick={()=>move(index,-1)}><ArrowUp size={15}/></button>
        <button type="button" title="Move down" disabled={index===fields.length-1} onClick={()=>move(index,1)}><ArrowDown size={15}/></button>

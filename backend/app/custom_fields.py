@@ -10,7 +10,7 @@ router = APIRouter(prefix="/api/v1", tags=["Dynamic Custom Fields"])
 
 FIELD_TYPES = {
     "text", "long_text", "number", "decimal", "date",
-    "dropdown", "multi_select", "checkbox", "email", "phone"
+    "dropdown", "multi_select", "checkbox", "email", "phone", "product", "stock_quantity", "adjustment_reason"
 }
 
 MODULES = {
@@ -233,6 +233,18 @@ def save_custom_field_values(
             (module_key,)
         ).fetchall()
         by_key = {row["field_key"]: row for row in definitions}
+
+        # Validate required fields even when the client omits the key entirely.
+        for key, field in by_key.items():
+            value = payload.values.get(key)
+            if field["is_required"] and (
+                key not in payload.values or value is None or value == "" or value == []
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{field['label']} is required."
+                )
+
         for key, value in payload.values.items():
             field = by_key.get(key)
             if not field:

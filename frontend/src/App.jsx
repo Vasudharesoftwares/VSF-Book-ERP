@@ -1,3 +1,9 @@
+import FinanceModulesPage from "./FinanceModulesPage";
+import SalesBillingPage from "./SalesBillingPage";
+import DynamicProductsPage from "./DynamicProductsPage";
+import DynamicInventoryPage from "./DynamicInventoryPage";
+import PartiesPage from "./PartiesPage";
+import PurchasesPage from "./PurchasesPage";
 import {useEffect,useState} from "react";
 import CustomFieldsPanel from "./CustomFieldsPanel";
 import {
@@ -31,8 +37,12 @@ const blankProduct={
 };
 
 export default function App(){
- const [active,setActive]=useState("Dashboard");
- const [menuOpen,setMenuOpen]=useState(false);
+ const [active,setActive] = useState(() => {
+    const saved = localStorage.getItem("vsf_active_module");
+    return saved || "Dashboard";
+  });
+   useEffect(()=>{localStorage.setItem("vsf_active_module",active);},[active]);
+const [menuOpen,setMenuOpen]=useState(false);
  const [status,setStatus]=useState("Checking");
  const [tenant,setTenant]=useState("DEMO-01");
  const [products,setProducts]=useState([]);
@@ -149,7 +159,7 @@ export default function App(){
     <div className="nav-heading">{heading}</div>
     {items.map(([name,Icon])=><button key={name}
      className={`nav-item ${active===name?"active":""}`}
-     onClick={()=>{setActive(name);setMenuOpen(false);setSearch("");setError("");setMessage("");}}>
+     onClick={()=>{localStorage.setItem("vsf_active_module",name);setActive(name);setMenuOpen(false);setSearch("");setError("");setMessage("");}}>
      <Icon size={18}/><span>{name}</span>
      {name==="Sales & Billing"&&<span className="nav-tag">POS</span>}
     </button>)}</div>)}</nav>
@@ -181,109 +191,7 @@ export default function App(){
    </header>
 
    <section className="page-content">
-    {active==="Books & Products" ? <>
-     <div className="welcome-row">
-      <div><div className="eyebrow">CATALOGUE MANAGEMENT</div>
-       <h1>Books & Products</h1><p>Add and manage books, stationery and supplies.</p>
-      </div>
-      <button className="primary-action" onClick={()=>{setShowForm(!showForm);setError("");}}>
-       {showForm?<X size={17}/>:<Plus size={17}/>} {showForm?"Close":"Add Product"}
-      </button>
-     </div>
-
-     {showForm&&<form className="data-panel product-form" onSubmit={saveProduct}>
-      <h2>New product</h2>
-      <div className="form-grid">
-       <label>Product name *<input required value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/></label>
-       <label>SKU *<input required value={form.sku} onChange={e=>setForm({...form,sku:e.target.value})}/></label>
-       <label>Product type<select value={form.product_type} onChange={e=>setForm({...form,product_type:e.target.value})}>
-        <option value="book">Book</option><option value="stationery">Stationery</option>
-        <option value="school_supply">School supply</option><option value="office_supply">Office supply</option><option value="other">Other</option>
-       </select></label>
-       <label>ISBN-13<input value={form.isbn13} onChange={e=>setForm({...form,isbn13:e.target.value})}/></label>
-       <label>ISBN-10<input value={form.isbn10} onChange={e=>setForm({...form,isbn10:e.target.value})}/></label>
-       <label>Barcode<input value={form.barcode} onChange={e=>setForm({...form,barcode:e.target.value})}/></label>
-       <label>Author<input value={form.author} onChange={e=>setForm({...form,author:e.target.value})}/></label>
-       <label>Publisher / Brand<input value={form.publisher} onChange={e=>setForm({...form,publisher:e.target.value})}/></label>
-       <label>Edition<input value={form.edition} onChange={e=>setForm({...form,edition:e.target.value})}/></label>
-       <label>Class / Grade<input value={form.class_grade} onChange={e=>setForm({...form,class_grade:e.target.value})}/></label>
-       <label>Subject<input value={form.subject} onChange={e=>setForm({...form,subject:e.target.value})}/></label>
-       <label>Board / Curriculum<input value={form.board} onChange={e=>setForm({...form,board:e.target.value})}/></label>
-       <label>HSN code<input value={form.hsn_code} onChange={e=>setForm({...form,hsn_code:e.target.value})}/></label>
-       <label>MRP (₹)<input type="number" min="0" step="0.01" value={form.mrp} onChange={e=>setForm({...form,mrp:e.target.value})}/></label>
-       <label>Purchase price (₹)<input type="number" min="0" step="0.01" value={form.purchase_price} onChange={e=>setForm({...form,purchase_price:e.target.value})}/></label>
-       <label>Selling price (₹)<input type="number" min="0" step="0.01" value={form.selling_price} onChange={e=>setForm({...form,selling_price:e.target.value})}/></label>
-       <label>GST rate (%)<input type="number" min="0" step="0.01" value={form.gst_rate} onChange={e=>setForm({...form,gst_rate:e.target.value})}/></label>
-       <label>Minimum stock alert<input type="number" min="0" step="1" value={form.reorder_level} onChange={e=>setForm({...form,reorder_level:e.target.value})}/></label>
-       <label>Shelf / Rack<input value={form.shelf_location} onChange={e=>setForm({...form,shelf_location:e.target.value})}/></label>
-      </div>
-      <div className="form-actions"><button className="primary-action" type="submit"><Save size={16}/> Save product</button></div>
-     </form>}
-
-     <div className="data-toolbar">
-      <div className="search-field"><Search size={18}/><input placeholder="Search name, SKU, ISBN, barcode, author..." value={search} onChange={e=>setSearch(e.target.value)}/></div>
-      <button className="secondary-action" onClick={loadProducts}><RefreshCw size={16}/> Refresh</button>
-     </div>
-     {error&&<div className="error-message"><AlertTriangle size={17}/>{error}</div>}
-     {message&&<div className="success-message">{message}</div>}
-     <div className="data-panel table-panel">
-      <div className="panel-heading"><h2>Product catalogue</h2><span>{filteredProducts.length} products</span></div>
-      {loading?<p className="empty-state">Loading products...</p>:filteredProducts.length===0?
-       <p className="empty-state">No products found. Add your first book or product.</p>:
-       <div className="table-scroll"><table className="erp-table">
-        <thead><tr><th>Product</th><th>SKU</th><th>Type</th><th>ISBN / Barcode</th><th>MRP</th><th>Selling price</th></tr></thead>
-        <tbody>{filteredProducts.map(p=><tr key={p.id}>
-         <td><b>{p.name}</b><small>{p.author||p.publisher||""}</small></td>
-         <td>{p.sku}</td><td>{p.product_type.replaceAll("_"," ")}</td>
-         <td>{p.isbn13||p.isbn10||p.barcode||"—"}</td>
-         <td>₹{Number(p.mrp).toFixed(2)}</td>
-         <td>₹{Number(p.selling_price).toFixed(2)}</td>
-        </tr>)}</tbody>
- </table></div>}
-     </div>
-    </> : active==="Inventory" ? <>
-     <div className="welcome-row">
-      <div><div className="eyebrow">STOCK CONTROL</div>
-       <h1>Inventory</h1><p>Monitor stock levels and record stock corrections.</p>
-      </div>
-      <button className="secondary-action" onClick={loadInventory}><RefreshCw size={16}/> Refresh stock</button>
-     </div>
-     {error&&<div className="error-message"><AlertTriangle size={17}/>{error}</div>}
-     {message&&<div className="success-message">{message}</div>}
-     <div className="inventory-summary">
-      <div className="data-panel"><small>Stock items</small><strong>{inventory.length}</strong></div>
-      <div className="data-panel"><small>Low-stock items</small><strong>{inventory.filter(p=>p.low_stock).length}</strong></div>
-     </div>
-     <form className="data-panel adjustment-form" onSubmit={saveAdjustment}>
-      <h2>Adjust stock</h2>
-      <div className="form-grid">
-       <label>Product<select required value={adjustProduct} onChange={e=>setAdjustProduct(e.target.value)}>
-        <option value="">Select product</option>
-        {inventory.map(p=><option key={p.product_id} value={p.product_id}>{p.name} ({p.sku}) — Current: {p.quantity}</option>)}
-       </select></label>
-       <label>Quantity change (+ add / − remove)<input required type="number" step="0.01" value={adjustment.quantity_change} onChange={e=>setAdjustment({...adjustment,quantity_change:e.target.value})}/></label>
-       <label>Reason<input required value={adjustment.reason} onChange={e=>setAdjustment({...adjustment,reason:e.target.value})}/></label>
-      </div>
-      <div className="form-actions"><button className="primary-action" type="submit"><Save size={16}/> Save adjustment</button></div>
-     </form>
-     <div className="data-toolbar">
-      <div className="search-field"><Search size={18}/><input placeholder="Search inventory..." value={search} onChange={e=>setSearch(e.target.value)}/></div>
-     </div>
-     <div className="data-panel table-panel">
-      <div className="panel-heading"><h2>Current stock</h2><span>{filteredInventory.length} items</span></div>
-      {loading?<p className="empty-state">Loading inventory...</p>:filteredInventory.length===0?
-       <p className="empty-state">No stock records yet. Add products first.</p>:
-       <div className="table-scroll"><table className="erp-table">
-        <thead><tr><th>Product</th><th>SKU</th><th>Barcode</th><th>Available stock</th><th>Reorder level</th><th>Status</th></tr></thead>
-        <tbody>{filteredInventory.map(p=><tr key={p.product_id}>
-         <td><b>{p.name}</b><small>{p.shelf_location||""}</small></td>
-         <td>{p.sku}</td><td>{p.barcode||"—"}</td>
-         <td><b>{p.quantity} {p.unit}</b></td><td>{p.reorder_level}</td>
-         <td>{p.low_stock?<span className="stock-warning">Low stock</span>:<span className="stock-ok">In stock</span>}</td>
-        </tr>)}</tbody>
-       </table></div>}
-     </div>
-    </> : active==="Settings" ? <CustomFieldsPanel tenant={tenant}/> : <>
+    {active==="Purchases" ? <PurchasesPage tenant={tenant}/> : active==="Sales & Billing" ? <SalesBillingPage tenant={tenant}/> : active==="Books & Products" ? <DynamicProductsPage tenant={tenant}/> : active==="Inventory" ? <DynamicInventoryPage tenant={tenant}/> : ["Customers","Suppliers"].includes(active) ? <PartiesPage tenant={tenant} type={active==="Customers" ? "customer" : "supplier"}/> : active==="GST & Tax" ? <FinanceModulesPage tenant={tenant} mode="GST & Tax"/> : active==="Accounting" ? <FinanceModulesPage tenant={tenant} mode="Accounting"/> : active==="Settings" ? <CustomFieldsPanel tenant={tenant}/> : <>
      <div className="welcome-row"><div>
       <div className="eyebrow">BUSINESS MANAGEMENT</div>
       <h1>{active}</h1><p>Manage your business operations from one place.</p>
@@ -292,7 +200,7 @@ export default function App(){
       <div><b>Workspace status</b><p>Choose Books & Products or Inventory to start managing your catalogue and stock.</p></div>
      </div>
      <div className="section-title"><div><h2>Business modules</h2><p>Select a module to continue.</p></div></div>
-     <div className="module-grid">{cards.map(([name,desc,Icon])=><button className="module-card" key={name} onClick={()=>setActive(name)}>
+     <div className="module-grid">{cards.map(([name,desc,Icon])=><button className="module-card" key={name} onClick={()=>{localStorage.setItem("vsf_active_module",name);setActive(name)}}>
       <div className="module-icon"><Icon size={21}/></div><div className="module-copy"><b>{name}</b><p>{desc}</p></div><ArrowUpRight className="module-arrow" size={17}/>
      </button>)}</div>
     </>}

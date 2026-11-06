@@ -339,6 +339,43 @@ def update_product(
     return {"message": "Product updated.", "product": dict(product)}
 
 
+
+
+@app.delete("/api/v1/products/{product_id}")
+def delete_product(
+    product_id: int,
+    x_tenant_code: Optional[str] = Header(default=None),
+):
+    """Safely deactivate a product without destroying historical records."""
+    code = tenant_code_from_header(x_tenant_code)
+
+    with tenant_connection(code) as db:
+        product = db.execute(
+            "SELECT id, name, is_active FROM products WHERE id=?",
+            (product_id,),
+        ).fetchone()
+
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found.")
+
+        if not product["is_active"]:
+            return {
+                "message": "Product is already inactive.",
+                "product_id": product_id,
+            }
+
+        db.execute(
+            """UPDATE products
+               SET is_active=0, updated_at=CURRENT_TIMESTAMP
+               WHERE id=?""",
+            (product_id,),
+        )
+
+    return {
+        "message": "Product deactivated. Historical records have been preserved.",
+        "product_id": product_id,
+    }
+
 # ---------- Inventory ----------
 
 @app.get("/api/v1/inventory")
@@ -360,7 +397,8 @@ def list_inventory(
                 THEN 1 ELSE 0
             END AS low_stock
         FROM products p
-        LEFT JOIN stock_balances s ON s.product_id=p.id
+        LEFT JOIN stock_balances s
+          ON s.product_id=p.id AND s.branch_id=?
         WHERE p.is_active=1
     """
     params = []
@@ -376,7 +414,8 @@ def list_inventory(
     sql += " ORDER BY p.name"
 
     with tenant_connection(code) as db:
-        rows = db.execute(sql, params).fetchall()
+        branch_id = get_main_branch_id(db)
+        rows = db.execute(sql, [branch_id, *params]).fetchall()
 
     items = [dict(row) for row in rows]
     return {
@@ -472,3 +511,18 @@ def low_stock(
 
 from .custom_fields import router as custom_fields_router
 app.include_router(custom_fields_router)
+
+
+from .parties import router as parties_router
+app.include_router(parties_router)
+
+
+from .sales import router as sales_router
+app.include_router(sales_router)
+
+
+from .purchases import router as purchases_router
+app.include_router(purchases_router)
+
+from .finance import router as finance_router
+app.include_router(finance_router)
