@@ -189,11 +189,16 @@ export default function SalesBillingPage({ tenant }) {
     if (!Number.isFinite(paidAmount) || paidAmount < 0 || paidAmount > totals.total + 0.001) {
       return alerts.error("Enter a valid payment amount.");
     }
-    if (customFields.some(f => f.is_required && (
-      customValues[f.field_key] === undefined ||
-      customValues[f.field_key] === "" ||
-      customValues[f.field_key] === null
-    ))) return alerts.error("Please complete all required custom fields.");
+    const missingRequiredField = customFields.some(f => {
+      const value = customValues[f.field_key];
+      if (!f.is_required) return false;
+      if (f.field_type === "checkbox") return value !== true;
+      if (f.field_type === "multi_select") return !Array.isArray(value) || value.length === 0;
+      return value === undefined || value === null || String(value).trim() === "";
+    });
+    if (missingRequiredField) {
+      return alerts.error("Please complete all required custom fields.");
+    }
 
     const confirmed = await alerts.confirm(
       "Complete this sale?",
@@ -257,6 +262,14 @@ export default function SalesBillingPage({ tenant }) {
         <td>₹${money(item.unit_price)}</td>
         <td>₹${money(item.line_total)}</td>
       </tr>`).join("");
+    const customRows = Object.entries(invoice.custom_fields || {}).map(([key, value]) => {
+      const field = customFields.find(item => item.field_key === key);
+      const label = field?.label || key;
+      const displayValue = Array.isArray(value) ? value.join(", ")
+        : typeof value === "boolean" ? (value ? "Yes" : "No")
+        : String(value ?? "");
+      return `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(displayValue)}</td></tr>`;
+    }).join("");
     const html = `<!doctype html><html><head><title>${escapeHtml(invoice.invoice_number)}</title>
       <style>
       body{font-family:Arial,sans-serif;color:#111;padding:24px}
@@ -270,6 +283,7 @@ export default function SalesBillingPage({ tenant }) {
       <p><b>Date:</b> ${escapeHtml(invoice.invoice_date)}</p>
       <p><b>Customer:</b> ${escapeHtml(invoice.customer_name || "Walk-in Customer")}</p>
       <p><b>Mobile:</b> ${escapeHtml(invoice.customer_phone || "-")}</p>
+      ${customRows ? `<h3>Additional sale details</h3><table><tbody>${customRows}</tbody></table>` : ""}
       <table><thead><tr><th>Product</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead>
       <tbody>${rows}</tbody></table>
       <p class="right">Subtotal: ₹${money(invoice.subtotal)}</p>
@@ -326,6 +340,68 @@ export default function SalesBillingPage({ tenant }) {
             <div><label style={styles.label}>Mobile number</label><input style={styles.input} value={customerPhone} onChange={e => setCustomerPhone(e.target.value)} placeholder="Optional mobile number"/></div>
             <div><label style={styles.label}>Customer GST state code</label><input style={styles.input} value={customerStateCode} onChange={e => setCustomerStateCode(e.target.value.replace(/\\D/g, "").slice(0, 2))} placeholder="e.g. 03" inputMode="numeric" maxLength={2}/></div>
           </div>
+                  {customFields.length > 0 && <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #e5ebe5" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 12 }}>
+            {customFields.map(f => {
+              const value = customValues[f.field_key] ?? "";
+              const update = next => setCustomValues(previous => ({
+                ...previous, [f.field_key]: next
+              }));
+              const common = {
+                style: styles.input,
+                required: Boolean(f.is_required),
+                value,
+                onChange: e => update(e.target.value)
+              };
+
+              return <div key={f.id} style={{ minWidth: 0 }}>
+                <label style={styles.label}>
+                  {f.label}{f.is_required ? " *" : ""}
+                </label>
+                {f.field_type === "dropdown" ? (
+                  <select {...common}>
+                    <option value="">Select an option</option>
+                    {(f.options || []).map(option =>
+                      <option key={option} value={option}>{option}</option>
+                    )}
+                  </select>
+                ) : f.field_type === "multi_select" ? (
+                  <select
+                    style={styles.input}
+                    multiple
+                    required={Boolean(f.is_required)}
+                    value={Array.isArray(value) ? value : []}
+                    onChange={e => update(Array.from(e.target.selectedOptions, option => option.value))}
+                  >
+                    {(f.options || []).map(option =>
+                      <option key={option} value={option}>{option}</option>
+                    )}
+                  </select>
+                ) : f.field_type === "checkbox" ? (
+                  <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <input type="checkbox" checked={Boolean(value)}
+                      onChange={e => update(e.target.checked)} />
+                    <span>{f.label}</span>
+                  </label>
+                ) : f.field_type === "long_text" ? (
+                  <textarea {...common} rows={3} />
+                ) : (
+                  <input
+                    {...common}
+                    type={
+                      f.field_type === "decimal" || f.field_type === "stock_quantity"
+                        ? "number"
+                        : f.field_type === "phone" ? "tel"
+                        : ["text", "number", "date", "email"].includes(f.field_type)
+                          ? f.field_type : "text"
+                    }
+                    step={["decimal", "stock_quantity"].includes(f.field_type) ? "any" : undefined}
+                  />
+                )}
+              </div>;
+            })}
+          </div>
+        </div>}
           <small style={{ color: "#7c887f", display: "block", marginTop: 9 }}>Enter the customer's GST state code for interstate billing. Leave blank for a local / walk-in sale. Business state: {gstSettings?.state_code || "Not configured"}.</small>
         </section>
 
@@ -409,24 +485,7 @@ export default function SalesBillingPage({ tenant }) {
           <small style={{ display: "block", color: "#7b877e", marginTop: 6 }}>Leave blank to mark the full bill as paid. Enter zero for credit sale.</small>
         </section>
 
-        {/* {customFields.length > 0 && <section style={styles.panel}>
-          <h3 style={{ margin: "0 0 12px" }}>Additional sale details</h3>
-          {customFields.map(f => <div key={f.id} style={{ marginBottom: 11 }}>
-            <label style={styles.label}>{f.label}{f.is_required ? " *" : ""}</label>
-            {f.field_type === "dropdown" ? (
-              <select style={styles.input} value={customValues[f.field_key] ?? ""} onChange={e => setCustomValues(v => ({ ...v, [f.field_key]: e.target.value }))}>
-                <option value="">Select</option>
-                {(f.options || []).map(o => <option key={o} value={o}>{o}</option>)}
-              </select>
-            ) : f.field_type === "checkbox" ? (
-              <input type="checkbox" checked={!!customValues[f.field_key]} onChange={e => setCustomValues(v => ({ ...v, [f.field_key]: e.target.checked }))}/>
-            ) : f.field_type === "long_text" ? (
-              <textarea style={styles.input} value={customValues[f.field_key] ?? ""} onChange={e => setCustomValues(v => ({ ...v, [f.field_key]: e.target.value }))}/>
-            ) : (
-              <input style={styles.input} type={["number", "decimal", "date", "email"].includes(f.field_type) ? (f.field_type === "decimal" ? "number" : f.field_type) : "text"} value={customValues[f.field_key] ?? ""} onChange={e => setCustomValues(v => ({ ...v, [f.field_key]: e.target.value }))}/>
-            )}
-          </div>)}
-        </section>} */}
+
 
         <button disabled={busy || !cart.length} onClick={saveSale} style={{ ...styles.button, padding: 14, fontSize: 15, opacity: busy || !cart.length ? .6 : 1 }}>
           <Receipt size={17} style={{ verticalAlign: "middle", marginRight: 7 }}/>{busy ? "Saving invoice..." : "Complete Sale & Save Invoice"}
@@ -454,6 +513,23 @@ export default function SalesBillingPage({ tenant }) {
       <div style={{ background: "white", width: "min(720px, 100%)", maxHeight: "90vh", overflow: "auto", borderRadius: 14, padding: 22 }} onClick={e => e.stopPropagation()}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}><h2 style={{ margin: 0 }}>{selectedInvoice.invoice_number}</h2><button style={styles.secondary} onClick={() => setSelectedInvoice(null)}>Close</button></div>
         <p>{selectedInvoice.customer_name} · {selectedInvoice.invoice_date}</p>
+        {Object.keys(selectedInvoice.custom_fields || {}).length > 0 && (
+          <section style={{ background: "#f7f9f7", border: "1px solid #e5e9e5", borderRadius: 9, padding: 12, margin: "12px 0" }}>
+            <h3 style={{ margin: "0 0 10px", fontSize: 15 }}>Additional sale details</h3>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
+              {Object.entries(selectedInvoice.custom_fields || {}).map(([key, value]) => {
+                const field = customFields.find(item => item.field_key === key);
+                const displayValue = Array.isArray(value) ? value.join(", ")
+                  : typeof value === "boolean" ? (value ? "Yes" : "No")
+                  : String(value ?? "");
+                return <div key={key}>
+                  <small style={{ color: "#758078" }}>{field?.label || key}</small>
+                  <div style={{ fontWeight: 600, overflowWrap: "anywhere" }}>{displayValue || "—"}</div>
+                </div>;
+              })}
+            </div>
+          </section>
+        )}
         <table style={{ width: "100%", borderCollapse: "collapse" }}><thead><tr><th align="left">Product</th><th>Qty</th><th>Rate</th><th>Total</th></tr></thead><tbody>
           {selectedInvoice.items?.map(i => <tr key={i.id}><td style={{ padding: 8 }}>{i.product_name}</td><td align="center">{i.quantity}</td><td align="right">₹{money(i.unit_price)}</td><td align="right">₹{money(i.line_total)}</td></tr>)}
         </tbody></table>

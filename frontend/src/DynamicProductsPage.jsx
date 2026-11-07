@@ -185,23 +185,6 @@ export default function DynamicProductsPage({tenant}) {
        entityId={editId||undefined} showSave={false}
        onValuesChange={setValues}/>
    }
-   {fields.length>0&&<div className="form-actions">
-    <button className="primary-action" type="submit">
-     <Save size={16}/> {editId?"Save changes":"Save product"}
-    </button>
-    {editId&&<>
-     <button className="secondary-action" type="button" onClick={()=>{
-      setShowForm(false);setEditId(null);setValues({});
-     }}>
-      <X size={16}/> Cancel
-     </button>
-     <button className="secondary-action" type="button"
-      onClick={()=>deleteProduct(products.find(p=>p.id===editId))}
-      style={{color:"#b42318"}}>
-      <Trash2 size={16}/> Delete product
-     </button>
-    </>}
-   </div>}
    {fields.length>0&&<div style={{
      display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",
      gap:12,marginTop:16,padding:14,
@@ -223,8 +206,24 @@ export default function DynamicProductsPage({tenant}) {
       style={{padding:10,border:"1px solid #cfd9d1",borderRadius:7}}/>
     </label>
    </div>}
+   {fields.length>0&&<div className="form-actions">
+    <button className="primary-action" type="submit">
+     <Save size={16}/> {editId?"Save changes":"Save product"}
+    </button>
+    {editId&&<>
+     <button className="secondary-action" type="button" onClick={()=>{
+      setShowForm(false);setEditId(null);setValues({});
+     }}>
+      <X size={16}/> Cancel
+     </button>
+     <button className="secondary-action" type="button"
+      onClick={()=>deleteProduct(products.find(p=>p.id===editId))}
+      style={{color:"#b42318"}}>
+      <Trash2 size={16}/> Delete product
+     </button>
+    </>}
+   </div>}
   </form>}
-
   <div className="data-toolbar">
    <span>{products.length} products</span>
    <button className="secondary-action" onClick={load}><RefreshCw size={16}/> Refresh</button>

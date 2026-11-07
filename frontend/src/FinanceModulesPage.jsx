@@ -9,6 +9,9 @@ export default function FinanceModulesPage({tenant,mode="GST & Tax"}){
  const [error,setError]=useState("");
  const [busy,setBusy]=useState(false);
  const [accounts,setAccounts]=useState([]);
+ const [ledgerAccount,setLedgerAccount]=useState("");
+ const [fromDate,setFromDate]=useState("");
+ const [toDate,setToDate]=useState("");
  const [voucher,setVoucher]=useState({
   voucher_date:new Date().toISOString().slice(0,10),
   voucher_type:"Journal",narration:"",lines:[
@@ -39,23 +42,32 @@ export default function FinanceModulesPage({tenant,mode="GST & Tax"}){
     else if(tab==="GSTR-3B Preparation")path="/gst/gstr3b";
     else path="/gst/dashboard";
    }else{
+    const a=await get("/accounting/accounts");
+    setAccounts(a);
+
     if(tab==="Chart of Accounts")path="/accounting/accounts";
     else if(tab==="Journal Vouchers")path="/accounting/vouchers";
     else if(tab==="Trial Balance")path="/accounting/trial-balance";
     else if(tab==="Profit & Loss")path="/accounting/profit-loss";
     else if(tab==="Balance Sheet")path="/accounting/balance-sheet";
-    else if(tab==="General Ledger")path="/accounting/accounts";
+    else if(tab==="General Ledger"){
+     const selected=ledgerAccount || (a.length ? String(a[0].id) : "");
+     if(!selected){setData([]);return;}
+     if(!ledgerAccount)setLedgerAccount(selected);
+     path="/accounting/ledger/"+encodeURIComponent(selected);
+    }
+
+    const params=new URLSearchParams();
+    if(fromDate && ["General Ledger","Trial Balance","Profit & Loss"].includes(tab)) params.set("from_date",fromDate);
+    if(toDate && ["General Ledger","Trial Balance","Profit & Loss","Balance Sheet"].includes(tab)) params.set("to_date",toDate);
+    if(params.toString())path+="?"+params.toString();
    }
    const result=await get(path);
    setData(result);
-   if(!gst){
-    const a=await get("/accounting/accounts");
-    setAccounts(a);
-   }
   }catch(e){setError(e.message);setData(null);}
   finally{setBusy(false);}
  }
- useEffect(()=>{load();},[tenant,tab,mode]);
+ useEffect(()=>{load();},[tenant,tab,mode,ledgerAccount,fromDate,toDate]);
  const gstTabs=["GST Dashboard","GST Settings","Tax Rates","HSN/SAC","Sales Register","Purchase Register","Input Tax Credit","Output Tax","GSTR-1 Preparation","GSTR-3B Preparation"];
  const acctTabs=["Chart of Accounts","Journal Vouchers","General Ledger","Trial Balance","Profit & Loss","Balance Sheet"];
  const tabs=gst?gstTabs:acctTabs;
@@ -95,6 +107,21 @@ export default function FinanceModulesPage({tenant,mode="GST & Tax"}){
    }}>{t}</button>)}
   </div>
   {error&&<div style={{padding:12,background:"#fff0ee",color:"#a33125",borderRadius:8,marginBottom:12}}>{error}</div>}
+  {!gst&&["General Ledger","Trial Balance","Profit & Loss","Balance Sheet"].includes(tab)&&<div style={{display:"flex",gap:12,flexWrap:"wrap",alignItems:"end",background:"white",border:"1px solid #e0e8e1",borderRadius:10,padding:14,marginBottom:14}}>
+   {tab==="General Ledger"&&<label style={{display:"grid",gap:5,fontSize:13,fontWeight:600}}>Account
+    <select value={ledgerAccount} onChange={e=>setLedgerAccount(e.target.value)} style={{padding:10,minWidth:220,border:"1px solid #dce5de",borderRadius:7}}>
+     {accounts.map(a=><option key={a.id} value={a.id}>{a.code} - {a.name}</option>)}
+    </select>
+   </label>}
+   {tab!=="Balance Sheet"&&<label style={{display:"grid",gap:5,fontSize:13,fontWeight:600}}>From date
+    <input type="date" value={fromDate} onChange={e=>setFromDate(e.target.value)} style={{padding:10,border:"1px solid #dce5de",borderRadius:7}}/>
+   </label>}
+   <label style={{display:"grid",gap:5,fontSize:13,fontWeight:600}}>{tab==="Balance Sheet"?"As at date":"To date"}
+    <input type="date" value={toDate} onChange={e=>setToDate(e.target.value)} style={{padding:10,border:"1px solid #dce5de",borderRadius:7}}/>
+   </label>
+   <button type="button" onClick={()=>{setFromDate("");setToDate("");}} style={{padding:"10px 14px",border:"1px solid #dce5de",borderRadius:7,background:"#f5f8f5",color:"#285a3b",cursor:"pointer"}}>Clear dates</button>
+  </div>}
+
   {busy?<p>Loading...</p>:null}
   {!busy&&data&&gst&&tab==="GST Dashboard"&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:12}}>
    {[
@@ -135,6 +162,7 @@ export default function FinanceModulesPage({tenant,mode="GST & Tax"}){
    <button style={{marginLeft:10}}>Post Balanced Voucher</button>
   </form>}
   {!gst&&!["Journal Vouchers"].includes(tab)&&Array.isArray(data)&&tab==="Profit & Loss"&&<h3>Profit & Loss statement</h3>}
+  {!gst&&tab==="General Ledger"&&<h3>General Ledger</h3>}
   {!gst&&!["Journal Vouchers"].includes(tab)&&Array.isArray(data)&&tab==="Balance Sheet"&&<h3>Balance Sheet</h3>}
   <p style={{fontSize:12,color:"#77847b",marginTop:18}}>Figures are based on available posted transaction records. GST return screens are preparation reports, not government filings.</p>
  </div>;

@@ -1,4 +1,5 @@
 import FinanceModulesPage from "./FinanceModulesPage";
+import ReportsPage from "./ReportsPage";
 import SalesBillingPage from "./SalesBillingPage";
 import DynamicProductsPage from "./DynamicProductsPage";
 import DynamicInventoryPage from "./DynamicInventoryPage";
@@ -191,7 +192,7 @@ const [menuOpen,setMenuOpen]=useState(false);
    </header>
 
    <section className="page-content">
-    {active==="Purchases" ? <PurchasesPage tenant={tenant}/> : active==="Sales & Billing" ? <SalesBillingPage tenant={tenant}/> : active==="Books & Products" ? <DynamicProductsPage tenant={tenant}/> : active==="Inventory" ? <DynamicInventoryPage tenant={tenant}/> : ["Customers","Suppliers"].includes(active) ? <PartiesPage tenant={tenant} type={active==="Customers" ? "customer" : "supplier"}/> : active==="GST & Tax" ? <FinanceModulesPage tenant={tenant} mode="GST & Tax"/> : active==="Accounting" ? <FinanceModulesPage tenant={tenant} mode="Accounting"/> : active==="Settings" ? <CustomFieldsPanel tenant={tenant}/> : <>
+    {active==="Purchases" ? <PurchasesPage tenant={tenant}/> : active==="Sales & Billing" ? <SalesBillingPage tenant={tenant}/> : active==="Books & Products" ? <DynamicProductsPage tenant={tenant}/> : active==="Inventory" ? <DynamicInventoryPage tenant={tenant}/> : ["Customers","Suppliers"].includes(active) ? <PartiesPage tenant={tenant} type={active==="Customers" ? "customer" : "supplier"}/> : active==="GST & Tax" ? <FinanceModulesPage tenant={tenant} mode="GST & Tax"/> : active==="Accounting" ? <FinanceModulesPage tenant={tenant} mode="Accounting"/> : active==="Reports" ? <ReportsPage tenant={tenant}/> : active==="Settings" ? <CustomFieldsPanel tenant={tenant}/> : <>
      <div className="welcome-row"><div>
       <div className="eyebrow">BUSINESS MANAGEMENT</div>
       <h1>{active}</h1><p>Manage your business operations from one place.</p>

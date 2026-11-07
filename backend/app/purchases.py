@@ -108,6 +108,69 @@ def setup(db):
         ON purchase_returns(supplier_id);
     """)
 
+    # Perpetual weighted-average costing tables.
+    # DDL is run by setup before the goods-receipt transaction begins.
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS inventory_cost_balances (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        branch_id INTEGER NOT NULL,
+        product_id INTEGER NOT NULL,
+        physical_quantity REAL NOT NULL DEFAULT 0,
+        inventory_value REAL NOT NULL DEFAULT 0,
+        average_unit_cost REAL,
+        cost_status TEXT NOT NULL DEFAULT 'verified',
+        last_movement_id INTEGER,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(branch_id, product_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS inventory_cost_movements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        movement_key TEXT NOT NULL UNIQUE,
+        branch_id INTEGER NOT NULL,
+        product_id INTEGER NOT NULL,
+        movement_type TEXT NOT NULL,
+        reference_type TEXT,
+        reference_id INTEGER,
+        reference_line_id INTEGER,
+        quantity_in REAL NOT NULL DEFAULT 0,
+        quantity_out REAL NOT NULL DEFAULT 0,
+        unit_cost REAL,
+        value_in REAL NOT NULL DEFAULT 0,
+        value_out REAL NOT NULL DEFAULT 0,
+        quantity_after REAL NOT NULL,
+        inventory_value_after REAL NOT NULL,
+        cost_status TEXT NOT NULL,
+        notes TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_inventory_cost_movements_product
+    ON inventory_cost_movements(branch_id, product_id, id);
+
+    CREATE INDEX IF NOT EXISTS idx_inventory_cost_movements_reference
+    ON inventory_cost_movements(reference_type, reference_id);
+    """)
+
+    # Receipt-linked supplier invoice allocations.
+    # Multiple invoices may cover one receipt line, but never more than accepted qty.
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS purchase_receipt_invoice_lines (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        purchase_id INTEGER NOT NULL REFERENCES purchases(id),
+        purchase_item_id INTEGER NOT NULL REFERENCES purchase_items(id),
+        goods_receipt_item_id INTEGER NOT NULL REFERENCES goods_receipt_items(id),
+        quantity REAL NOT NULL CHECK(quantity > 0),
+        receipt_unit_cost REAL NOT NULL,
+        invoice_unit_cost REAL NOT NULL,
+        inventory_variance_allocation REAL NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_receipt_invoice_allocations_item
+    ON purchase_receipt_invoice_lines(goods_receipt_item_id);
+    """)
+
     # Idempotent posting flags for existing purchase invoices.
     columns = {
         row["name"] for row in db.execute(
@@ -118,6 +181,73 @@ def setup(db):
         db.execute(
             "ALTER TABLE purchases ADD COLUMN stock_posted INTEGER NOT NULL DEFAULT 0"
         )
+
+    # Receipt-linked purchase invoice status migrations.
+    purchase_columns = {
+        row["name"] for row in db.execute(
+            "PRAGMA table_info(purchases)"
+        ).fetchall()
+    }
+    purchase_status_migrations = {
+        "receipt_allocation_status": "TEXT NOT NULL DEFAULT 'pending'",
+        "inventory_cost_status": "TEXT NOT NULL DEFAULT 'pending'",
+    }
+    for column, definition in purchase_status_migrations.items():
+        if column not in purchase_columns:
+            db.execute(
+                f"ALTER TABLE purchases ADD COLUMN {column} {definition}"
+            )
+
+    # Receipt-linked invoice costing and quantity-allocation migrations.
+    purchase_item_columns = {
+        row["name"] for row in db.execute(
+            "PRAGMA table_info(purchase_items)"
+        ).fetchall()
+    }
+    purchase_item_migrations = {
+        "receipt_allocated_quantity": "REAL NOT NULL DEFAULT 0",
+        "final_cost_variance": "REAL NOT NULL DEFAULT 0",
+        "costing_status": "TEXT NOT NULL DEFAULT 'pending'",
+    }
+    for column, definition in purchase_item_migrations.items():
+        if column not in purchase_item_columns:
+            db.execute(
+                f"ALTER TABLE purchase_items ADD COLUMN {column} {definition}"
+            )
+
+    receipt_item_columns = {
+        row["name"] for row in db.execute(
+            "PRAGMA table_info(goods_receipt_items)"
+        ).fetchall()
+    }
+    receipt_item_migrations = {
+        "invoiced_quantity": "REAL NOT NULL DEFAULT 0",
+        "costing_status": "TEXT NOT NULL DEFAULT 'pending'",
+    }
+    for column, definition in receipt_item_migrations.items():
+        if column not in receipt_item_columns:
+            db.execute(
+                f"ALTER TABLE goods_receipt_items ADD COLUMN {column} {definition}"
+            )
+
+    # Idempotent purchase-return accounting allocation fields.
+    return_item_columns = {
+        row["name"] for row in db.execute(
+            "PRAGMA table_info(purchase_return_items)"
+        ).fetchall()
+    }
+    return_item_migrations = {
+        "original_purchase_item_id": "INTEGER",
+        "inventory_unit_cost": "REAL NOT NULL DEFAULT 0",
+        "supplier_credit_total": "REAL NOT NULL DEFAULT 0",
+        "cost_variance": "REAL NOT NULL DEFAULT 0",
+        "costing_status": "TEXT NOT NULL DEFAULT 'pending'",
+    }
+    for column, definition in return_item_migrations.items():
+        if column not in return_item_columns:
+            db.execute(
+                f"ALTER TABLE purchase_return_items ADD COLUMN {column} {definition}"
+            )
 
 
 def branch_id(db):
@@ -206,6 +336,26 @@ class DirectPurchaseCreate(BaseModel):
     items: list[DirectPurchaseItem] = Field(min_length=1)
 
 
+class ReceiptInvoiceItem(BaseModel):
+    goods_receipt_item_id: int = Field(gt=0)
+    quantity: float = Field(gt=0)
+    unit_cost: float = Field(gt=0)
+    gst_rate: float = Field(default=0, ge=0)
+    discount_amount: float = Field(default=0, ge=0)
+    # Signed amount allocated to remaining inventory.
+    # The unallocated variance is automatically posted to PPV.
+    inventory_variance_allocation: float = 0
+
+
+class ReceiptInvoiceCreate(BaseModel):
+    goods_receipt_id: int = Field(gt=0)
+    supplier_id: int = Field(gt=0)
+    invoice_date: Optional[str] = None
+    supplier_invoice_no: Optional[str] = None
+    notes: Optional[str] = None
+    items: list[ReceiptInvoiceItem] = Field(min_length=1)
+
+
 class SupplierPaymentCreate(BaseModel):
     purchase_id: int = Field(gt=0)
     amount: float = Field(gt=0)
@@ -225,7 +375,7 @@ class ReturnItem(BaseModel):
 
 class ReturnCreate(BaseModel):
     supplier_id: int = Field(gt=0)
-    purchase_id: Optional[int] = None
+    purchase_id: int = Field(gt=0)
     return_date: Optional[str] = None
     reason: Optional[str] = None
     items: list[ReturnItem] = Field(min_length=1)
@@ -253,7 +403,10 @@ def purchase_dashboard(x_tenant_code: Optional[str] = Header(None)):
                 "SELECT COALESCE(SUM(grand_total),0) FROM purchases"
             ).fetchone()[0],
             "supplier_payable": db.execute(
-                "SELECT COALESCE(SUM(balance_amount),0) FROM purchases"
+                "SELECT COALESCE(SUM(CASE WHEN balance_amount > 0 THEN balance_amount ELSE 0 END),0) FROM purchases"
+            ).fetchone()[0],
+            "supplier_credit": db.execute(
+                "SELECT COALESCE(SUM(CASE WHEN balance_amount < 0 THEN -balance_amount ELSE 0 END),0) FROM purchases"
             ).fetchone()[0],
             "returns": db.execute(
                 "SELECT COUNT(*) FROM purchase_returns"
@@ -472,28 +625,86 @@ def list_goods_receipts(x_tenant_code: Optional[str] = Header(None)):
     return {"receipts": [dict(x) for x in rows]}
 
 
-@router.post("/goods-receipts/{receipt_id}/accept")
-def accept_goods_receipt(
+@router.get("/goods-receipts/{receipt_id}")
+def get_goods_receipt_detail(
     receipt_id: int,
     x_tenant_code: Optional[str] = Header(None)
 ):
     code = tenant_code(x_tenant_code)
     with tenant_connection(code) as db:
         setup(db)
+        receipt = db.execute("""
+            SELECT gr.*, p.name AS supplier_name
+            FROM goods_receipts gr
+            JOIN parties p ON p.id=gr.supplier_id
+            WHERE gr.id=?
+        """, (receipt_id,)).fetchone()
+
+        if not receipt:
+            raise HTTPException(status_code=404, detail="Goods receipt not found.")
+
+        rows = db.execute("""
+            SELECT gri.*, pr.name AS product_name, pr.sku
+            FROM goods_receipt_items gri
+            JOIN products pr ON pr.id=gri.product_id
+            WHERE gri.goods_receipt_id=?
+            ORDER BY gri.id
+        """, (receipt_id,)).fetchall()
+
+        items = []
+        for row in rows:
+            item = dict(row)
+            accepted = float(item.get("accepted_quantity") or 0)
+            invoiced = float(item.get("invoiced_quantity") or 0)
+            item["remaining_quantity"] = max(0.0, accepted - invoiced)
+            items.append(item)
+
+    result = dict(receipt)
+    result["items"] = items
+    return result
+
+
+@router.post("/goods-receipts/{receipt_id}/accept")
+def accept_goods_receipt(
+    receipt_id: int,
+    x_tenant_code: Optional[str] = Header(None)
+):
+    code = tenant_code(x_tenant_code)
+
+    with tenant_connection(code) as db:
+        setup(db)
+
+        # Finance setup uses schema scripts; run it before BEGIN IMMEDIATE.
+        from .finance import (
+            setup as finance_setup,
+            post_journal,
+            accounts_map,
+        )
+        from .wac_engine import (
+            receive_inventory,
+            WACError,
+        )
+
+        finance_setup(db)
+        db.commit()
         db.execute("BEGIN IMMEDIATE")
+
         receipt = db.execute(
             "SELECT * FROM goods_receipts WHERE id=?", (receipt_id,)
         ).fetchone()
+
         if not receipt:
             raise HTTPException(status_code=404, detail="Goods receipt not found.")
         if receipt["status"] == "accepted":
             raise HTTPException(status_code=409, detail="Goods receipt was already accepted.")
         if receipt["status"] != "draft":
             raise HTTPException(status_code=400, detail="Only draft receipts can be accepted.")
+
         items = db.execute(
-            "SELECT * FROM goods_receipt_items WHERE goods_receipt_id=?",
+            "SELECT * FROM goods_receipt_items WHERE goods_receipt_id=? ORDER BY id",
             (receipt_id,)
         ).fetchall()
+
         if not items:
             raise HTTPException(status_code=400, detail="Receipt has no items.")
 
@@ -507,7 +718,8 @@ def accept_goods_receipt(
                         detail="Purchase-order receipt contains an unlinked item."
                     )
                 requested[po_item_id] = (
-                    requested.get(po_item_id, 0) + float(item["received_quantity"])
+                    requested.get(po_item_id, 0)
+                    + float(item["received_quantity"])
                 )
 
             for po_item_id, requested_quantity in requested.items():
@@ -531,57 +743,200 @@ def accept_goods_receipt(
                         detail="Receipt exceeds the remaining ordered quantity."
                     )
 
+        inventory_total = 0.0
+        accepted_item_count = 0
+
         for item in items:
             accepted = money(item["accepted_quantity"])
+
             if accepted > 0:
+                unit_cost = money(item["unit_cost"])
+
+                if unit_cost <= 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Enter a positive unit cost for product "
+                            f"{item['product_id']} before accepting this receipt."
+                        )
+                    )
+
                 old = db.execute("""
                     SELECT quantity FROM stock_balances
                     WHERE branch_id=? AND product_id=?
-                """, (receipt["branch_id"],item["product_id"])).fetchone()
-                previous = float(old["quantity"]) if old else 0
-                new = money(previous + accepted)
+                """, (receipt["branch_id"], item["product_id"])).fetchone()
+
+                previous = float(old["quantity"]) if old else 0.0
+
+                # If a WAC balance exists, its quantity must match physical stock.
+                cost_balance = db.execute("""
+                    SELECT physical_quantity
+                    FROM inventory_cost_balances
+                    WHERE branch_id=? AND product_id=?
+                """, (receipt["branch_id"], item["product_id"])).fetchone()
+
+                if cost_balance and abs(
+                    float(cost_balance["physical_quantity"]) - previous
+                ) > 0.000001:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"Physical stock and verified cost quantity differ "
+                            f"for product {item['product_id']}. Reconcile opening "
+                            f"stock before accepting this receipt."
+                        )
+                    )
+
+                movement_key = (
+                    f"goods-receipt:{receipt_id}:item:{item['id']}"
+                )
+
+                try:
+                    receive_inventory(
+                        db,
+                        movement_key=movement_key,
+                        branch_id=receipt["branch_id"],
+                        product_id=item["product_id"],
+                        quantity=accepted,
+                        unit_cost=unit_cost,
+                        movement_type="purchase_receipt",
+                        reference_type="goods_receipt",
+                        reference_id=receipt_id,
+                        reference_line_id=item["id"],
+                        notes=receipt["receipt_no"],
+                    )
+                except WACError as exc:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"Inventory costing could not be updated for "
+                            f"product {item['product_id']}: {exc}"
+                        )
+                    )
+
+                new_quantity = money(previous + accepted)
+
                 db.execute("""
                     INSERT INTO stock_balances(branch_id,product_id,quantity)
                     VALUES (?,?,?)
                     ON CONFLICT(branch_id,product_id)
-                    DO UPDATE SET quantity=excluded.quantity,updated_at=CURRENT_TIMESTAMP
-                """, (receipt["branch_id"],item["product_id"],new))
+                    DO UPDATE SET
+                        quantity=excluded.quantity,
+                        updated_at=CURRENT_TIMESTAMP
+                """, (
+                    receipt["branch_id"],
+                    item["product_id"],
+                    new_quantity,
+                ))
+
                 db.execute("""
                     INSERT INTO stock_ledger
-                    (branch_id,product_id,transaction_type,reference_type,reference_id,
-                     quantity_in,quantity_out,balance_after,unit_cost,notes)
-                    VALUES (?,?, 'purchase_receipt','goods_receipt',?,?,?, ?,?,?)
+                    (branch_id,product_id,transaction_type,reference_type,
+                     reference_id,quantity_in,quantity_out,balance_after,
+                     unit_cost,notes)
+                    VALUES (?, ?, 'purchase_receipt', 'goods_receipt',
+                            ?, ?, 0, ?, ?, ?)
                 """, (
-                    receipt["branch_id"],item["product_id"],receipt_id,
-                    accepted,0,new,item["unit_cost"],receipt["receipt_no"]
+                    receipt["branch_id"],
+                    item["product_id"],
+                    receipt_id,
+                    accepted,
+                    new_quantity,
+                    unit_cost,
+                    receipt["receipt_no"],
                 ))
+
+                inventory_total = money(
+                    inventory_total + money(accepted * unit_cost)
+                )
+                accepted_item_count += 1
 
             if item["purchase_order_item_id"]:
                 db.execute("""
                     UPDATE purchase_order_items
                     SET received_quantity=received_quantity+?
                     WHERE id=?
-                """, (item["received_quantity"],item["purchase_order_item_id"]))
+                """, (
+                    item["received_quantity"],
+                    item["purchase_order_item_id"],
+                ))
+
+        # Post one balanced Inventory / GRNI journal for the accepted goods.
+        if inventory_total > 0:
+            account_ids = accounts_map(db)
+            inventory_account = account_ids.get("Inventory")
+            grni_account = account_ids.get("Goods Received Not Invoiced")
+
+            if not inventory_account or not grni_account:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Inventory or GRNI accounting account is missing."
+                )
+
+            try:
+                post_journal(
+                    db,
+                    voucher_date=receipt["receipt_date"],
+                    voucher_type="GOODS_RECEIPT",
+                    narration=f"Goods receipt {receipt['receipt_no']} - GRNI",
+                    source_type="goods_receipt",
+                    source_id=receipt_id,
+                    lines=[
+                        {
+                            "account_id": inventory_account,
+                            "debit": inventory_total,
+                            "credit": 0,
+                            "narration": "Inventory received",
+                        },
+                        {
+                            "account_id": grni_account,
+                            "debit": 0,
+                            "credit": inventory_total,
+                            "narration": "Goods received not invoiced",
+                        },
+                    ],
+                )
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Goods receipt accounting could not be posted: {exc}"
+                )
 
         db.execute(
             "UPDATE goods_receipts SET status='accepted' WHERE id=?",
             (receipt_id,)
         )
+
         if receipt["purchase_order_id"]:
             remaining = db.execute("""
                 SELECT COUNT(*) FROM purchase_order_items
                 WHERE purchase_order_id=? AND received_quantity < quantity
             """, (receipt["purchase_order_id"],)).fetchone()[0]
+
             received = db.execute("""
                 SELECT COUNT(*) FROM purchase_order_items
                 WHERE purchase_order_id=? AND received_quantity > 0
             """, (receipt["purchase_order_id"],)).fetchone()[0]
-            status = "received" if remaining == 0 else ("partially_received" if received else "sent")
+
+            status = (
+                "received" if remaining == 0
+                else ("partially_received" if received else "sent")
+            )
+
             db.execute(
                 "UPDATE purchase_orders SET status=? WHERE id=?",
-                (status,receipt["purchase_order_id"])
+                (status, receipt["purchase_order_id"])
             )
-    return {"message": "Goods receipt accepted. Accepted quantities added to stock."}
+
+    return {
+        "message": (
+            "Goods receipt accepted. Stock, weighted-average cost and "
+            "GRNI accounting were updated."
+        ),
+        "id": receipt_id,
+        "accepted_items": accepted_item_count,
+        "inventory_value": inventory_total,
+    }
 
 
 @router.post("/purchases/direct", status_code=201)
@@ -592,32 +947,94 @@ def create_direct_purchase(
     code = tenant_code(x_tenant_code)
     with tenant_connection(code) as db:
         setup(db)
+        from .finance import setup as finance_setup, post_journal, accounts_map
+        finance_setup(db)
+        db.commit()
         supplier = db.execute(
-            "SELECT id FROM parties WHERE id=? AND party_type IN ('supplier','both') AND is_active=1",
+            "SELECT id,state_code FROM parties WHERE id=? AND party_type IN ('supplier','both') AND is_active=1",
             (payload.supplier_id,)
         ).fetchone()
         if not supplier:
             raise HTTPException(status_code=404, detail="Supplier not found.")
         branch = branch_id(db)
+        gst_settings = db.execute(
+            "SELECT state_code FROM gst_settings WHERE id=1"
+        ).fetchone()
+        business_state = str(
+            (gst_settings["state_code"] if gst_settings else "") or ""
+        ).strip()
+        supplier_state = str(supplier["state_code"] or "").strip()
+
+        # GST state codes must be valid two-digit Indian state codes.
+        GST_STATE_CODES = {
+            "01", "02", "03", "04", "05", "06", "07", "08", "09",
+            "10", "11", "12", "13", "14", "15", "16", "17", "18",
+            "19", "20", "21", "22", "23", "24", "26", "27", "29",
+            "30", "31", "32", "33", "34", "35", "36", "37", "38",
+            "97", "99",
+        }
+
+        if business_state not in GST_STATE_CODES:
+            raise HTTPException(
+                status_code=400,
+                detail="Configure a valid 2-digit business GST state code before posting purchases."
+            )
+
+        if supplier_state not in GST_STATE_CODES:
+            raise HTTPException(
+                status_code=400,
+                detail="Configure a valid 2-digit GST state code for this supplier before posting purchases."
+            )
+
+        intra_state = business_state == supplier_state
+
         calculated = []
-        subtotal = discount_total = taxable_total = tax_total = 0.0
+        subtotal = discount_total = taxable_total = 0.0
+        cgst_total = sgst_total = igst_total = tax_total = 0.0
+
         for item in payload.items:
             product = product_or_404(db,item.product_id)
             gross = money(item.quantity * item.unit_cost)
             discount = money(item.discount_amount)
             if discount > gross:
                 raise HTTPException(status_code=400, detail="Line discount exceeds line value.")
+
             taxable = money(gross - discount)
             tax = money(taxable * item.gst_rate / 100)
-            calculated.append((item,product,taxable,tax,money(taxable+tax)))
+
+            if intra_state:
+                cgst = money(tax / 2)
+                sgst = money(tax - cgst)
+                igst = 0.0
+            else:
+                cgst = sgst = 0.0
+                igst = tax
+
+            calculated.append((
+                item, product, taxable, tax, cgst, sgst, igst,
+                money(taxable + tax)
+            ))
             subtotal += gross
             discount_total += discount
             taxable_total += taxable
+            cgst_total += cgst
+            sgst_total += sgst
+            igst_total += igst
             tax_total += tax
+
+        subtotal = money(subtotal)
+        discount_total = money(discount_total)
+        taxable_total = money(taxable_total)
+        cgst_total = money(cgst_total)
+        sgst_total = money(sgst_total)
+        igst_total = money(igst_total)
+        tax_total = money(cgst_total + sgst_total + igst_total)
         grand_total = money(taxable_total + tax_total)
         paid = money(payload.paid_amount)
         if paid > grand_total:
             raise HTTPException(status_code=400, detail="Payment cannot exceed invoice total.")
+        if paid > 0 and payload.payment_method not in ("cash", "upi", "card", "bank_transfer", "cheque"):
+            raise HTTPException(status_code=400, detail="Select a valid payment method.")
         balance = money(grand_total-paid)
         invoice_no = next_number(db,"purchases","invoice_no","PINV-",branch)
         now = datetime.now().date().isoformat()
@@ -625,19 +1042,20 @@ def create_direct_purchase(
         cursor = db.execute("""
             INSERT INTO purchases
             (invoice_no,supplier_id,branch_id,invoice_date,supplier_invoice_no,
-             subtotal,discount_amount,taxable_amount,total_tax,grand_total,
-             paid_amount,balance_amount,status,notes,stock_posted)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
+             subtotal,discount_amount,taxable_amount,cgst,sgst,igst,total_tax,
+             grand_total,paid_amount,balance_amount,status,notes,stock_posted)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
         """, (
             invoice_no,payload.supplier_id,branch,
             payload.invoice_date or now,payload.supplier_invoice_no,
-            money(subtotal),money(discount_total),money(taxable_total),
-            money(tax_total),grand_total,paid,balance,
+            subtotal,discount_total,taxable_total,
+            cgst_total,sgst_total,igst_total,tax_total,
+            grand_total,paid,balance,
             "paid" if balance == 0 else ("partial" if paid else "unpaid"),
             payload.notes
         ))
         purchase_id = cursor.lastrowid
-        for item,product,taxable,tax,line_total in calculated:
+        for item,product,taxable,tax,cgst,sgst,igst,line_total in calculated:
             db.execute("""
                 INSERT INTO purchase_items
                 (purchase_id,product_id,quantity,unit_cost,discount_amount,
@@ -682,10 +1100,596 @@ def create_direct_purchase(
                 payload.supplier_id,purchase_id,branch,payload.payment_method,
                 paid,now,payload.notes
             ))
+
+        # Post the purchase invoice to the general ledger.
+        if grand_total > 0:
+            account_ids = accounts_map(db)
+            payment_account = "Cash" if payload.payment_method == "cash" else "Bank"
+
+            required_accounts = [
+                "Inventory", "Input CGST", "Input SGST",
+                "Input IGST", "Accounts Payable"
+            ]
+            if paid > 0:
+                required_accounts.append(payment_account)
+
+            missing = [name for name in required_accounts if name not in account_ids]
+            if missing:
+                raise ValueError("Missing accounting accounts: " + ", ".join(missing))
+
+            journal_lines = [
+                {"account_id": account_ids["Inventory"], "debit": taxable_total, "credit": 0}
+            ]
+
+            if cgst_total > 0:
+                journal_lines.append({
+                    "account_id": account_ids["Input CGST"],
+                    "debit": cgst_total, "credit": 0
+                })
+            if sgst_total > 0:
+                journal_lines.append({
+                    "account_id": account_ids["Input SGST"],
+                    "debit": sgst_total, "credit": 0
+                })
+            if igst_total > 0:
+                journal_lines.append({
+                    "account_id": account_ids["Input IGST"],
+                    "debit": igst_total, "credit": 0
+                })
+            if paid > 0:
+                journal_lines.append({
+                    "account_id": account_ids[payment_account],
+                    "debit": 0, "credit": paid
+                })
+            if balance > 0:
+                journal_lines.append({
+                    "account_id": account_ids["Accounts Payable"],
+                    "debit": 0, "credit": balance
+                })
+
+            post_journal(
+                db,
+                payload.invoice_date or now,
+                "PURCHASE",
+                "Purchase invoice " + str(invoice_no),
+                "purchase_invoice",
+                purchase_id,
+                journal_lines,
+            )
     return {
         "message": "Direct purchase invoice posted and stock updated.",
         "id": purchase_id,"invoice_no": invoice_no,
         "grand_total": grand_total,"paid_amount": paid,"balance_amount": balance
+    }
+
+
+@router.post("/purchases/from-goods-receipt")
+def create_purchase_from_goods_receipt(
+    payload: ReceiptInvoiceCreate,
+    x_tenant_code: Optional[str] = Header(None)
+):
+    """
+    Post a supplier invoice against accepted goods.
+
+    This route does not receive stock again. It clears GRNI, records GST/AP,
+    and allocates the invoice-vs-receipt price difference between Inventory
+    and Purchase Price Variance (PPV).
+    """
+    code = tenant_code(x_tenant_code)
+
+    with tenant_connection(code) as db:
+        setup(db)
+
+        from .finance import (
+            setup as finance_setup,
+            post_journal,
+            accounts_map,
+        )
+        from .wac_engine import adjust_inventory_value, WACError
+
+        finance_setup(db)
+        db.commit()
+        db.execute("BEGIN IMMEDIATE")
+
+        receipt = db.execute("""
+            SELECT *
+            FROM goods_receipts
+            WHERE id=? AND supplier_id=?
+        """, (payload.goods_receipt_id, payload.supplier_id)).fetchone()
+
+        if not receipt:
+            raise HTTPException(
+                status_code=404,
+                detail="Goods receipt not found for this supplier."
+            )
+        if receipt["status"] != "accepted":
+            raise HTTPException(
+                status_code=400,
+                detail="Only accepted goods receipts can be invoiced."
+            )
+
+        supplier = db.execute("""
+            SELECT id, state_code
+            FROM parties
+            WHERE id=? AND party_type IN ('supplier','both') AND is_active=1
+        """, (payload.supplier_id,)).fetchone()
+
+        if not supplier:
+            raise HTTPException(status_code=404, detail="Supplier not found.")
+
+        gst_settings = db.execute(
+            "SELECT state_code FROM gst_settings WHERE id=1"
+        ).fetchone()
+
+        business_state = str(
+            (gst_settings["state_code"] if gst_settings else "") or ""
+        ).strip()
+        supplier_state = str(supplier["state_code"] or "").strip()
+
+        valid_states = {
+            "01", "02", "03", "04", "05", "06", "07", "08", "09",
+            "10", "11", "12", "13", "14", "15", "16", "17", "18",
+            "19", "20", "21", "22", "23", "24", "26", "27", "29",
+            "30", "31", "32", "33", "34", "35", "36", "37", "38",
+            "97", "99",
+        }
+
+        if business_state not in valid_states:
+            raise HTTPException(
+                status_code=400,
+                detail="Configure a valid 2-digit business GST state code."
+            )
+        if supplier_state not in valid_states:
+            raise HTTPException(
+                status_code=400,
+                detail="Configure a valid 2-digit supplier GST state code."
+            )
+
+        intra_state = business_state == supplier_state
+        seen_receipt_lines = set()
+        calculated = []
+
+        subtotal = discount_total = taxable_total = 0.0
+        cgst_total = sgst_total = igst_total = 0.0
+        grni_total = inventory_allocation_total = ppv_total = 0.0
+
+        for item in payload.items:
+            if item.goods_receipt_item_id in seen_receipt_lines:
+                raise HTTPException(
+                    status_code=400,
+                    detail="A receipt line may appear only once per invoice."
+                )
+            seen_receipt_lines.add(item.goods_receipt_item_id)
+
+            receipt_line = db.execute("""
+                SELECT gri.*, gr.branch_id, gr.receipt_no, gr.status
+                FROM goods_receipt_items gri
+                JOIN goods_receipts gr ON gr.id=gri.goods_receipt_id
+                WHERE gri.id=? AND gr.id=? AND gr.supplier_id=?
+            """, (
+                item.goods_receipt_item_id,
+                payload.goods_receipt_id,
+                payload.supplier_id,
+            )).fetchone()
+
+            if not receipt_line or receipt_line["status"] != "accepted":
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Receipt line {item.goods_receipt_item_id} "
+                        "does not belong to this accepted receipt."
+                    )
+                )
+
+            accepted_qty = money(receipt_line["accepted_quantity"])
+            receipt_cost = money(receipt_line["unit_cost"])
+
+            if accepted_qty <= 0 or receipt_cost <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Only accepted, positively costed receipt quantities can be invoiced."
+                )
+
+            previously_invoiced = db.execute("""
+                SELECT COALESCE(SUM(quantity),0)
+                FROM purchase_receipt_invoice_lines
+                WHERE goods_receipt_item_id=?
+            """, (item.goods_receipt_item_id,)).fetchone()[0]
+
+            available_qty = money(accepted_qty - float(previously_invoiced))
+            quantity = money(item.quantity)
+
+            if quantity > available_qty + 0.000001:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Invoice quantity for receipt line "
+                        f"{item.goods_receipt_item_id} exceeds its uninvoiced "
+                        f"accepted quantity ({available_qty})."
+                    )
+                )
+
+            invoice_unit_cost = money(item.unit_cost)
+            gross = money(quantity * invoice_unit_cost)
+            discount = money(item.discount_amount)
+
+            if discount > gross:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Line discount exceeds line value."
+                )
+
+            taxable = money(gross - discount)
+            tax = money(taxable * item.gst_rate / 100)
+
+            if intra_state:
+                cgst = money(tax / 2)
+                sgst = money(tax - cgst)
+                igst = 0.0
+            else:
+                cgst = sgst = 0.0
+                igst = tax
+
+            receipt_value = money(quantity * receipt_cost)
+            variance = money(taxable - receipt_value)
+            inventory_allocation = money(
+                item.inventory_variance_allocation
+            )
+
+            # Allocation must have the same sign as the variance and cannot
+            # exceed it. PPV receives the remaining amount.
+            if (
+                (variance > 0 and (
+                    inventory_allocation < 0
+                    or inventory_allocation > variance
+                ))
+                or (variance < 0 and (
+                    inventory_allocation > 0
+                    or inventory_allocation < variance
+                ))
+                or (variance == 0 and inventory_allocation != 0)
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Inventory variance allocation for receipt line "
+                        f"{item.goods_receipt_item_id} must be between zero "
+                        f"and the total variance, with the same sign."
+                    )
+                )
+
+            ppv = money(variance - inventory_allocation)
+
+            calculated.append({
+                "item": item,
+                "receipt_line": receipt_line,
+                "quantity": quantity,
+                "receipt_cost": receipt_cost,
+                "invoice_cost": invoice_unit_cost,
+                "gross": gross,
+                "discount": discount,
+                "taxable": taxable,
+                "tax": tax,
+                "cgst": cgst,
+                "sgst": sgst,
+                "igst": igst,
+                "line_total": money(taxable + tax),
+                "receipt_value": receipt_value,
+                "inventory_allocation": inventory_allocation,
+                "ppv": ppv,
+            })
+
+            subtotal += gross
+            discount_total += discount
+            taxable_total += taxable
+            cgst_total += cgst
+            sgst_total += sgst
+            igst_total += igst
+            grni_total += receipt_value
+            inventory_allocation_total += inventory_allocation
+            ppv_total += ppv
+
+        subtotal = money(subtotal)
+        discount_total = money(discount_total)
+        taxable_total = money(taxable_total)
+        cgst_total = money(cgst_total)
+        sgst_total = money(sgst_total)
+        igst_total = money(igst_total)
+        tax_total = money(cgst_total + sgst_total + igst_total)
+        grni_total = money(grni_total)
+        inventory_allocation_total = money(inventory_allocation_total)
+        ppv_total = money(ppv_total)
+        grand_total = money(taxable_total + tax_total)
+
+        if grand_total <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Supplier invoice total must be greater than zero."
+            )
+
+        branch = receipt["branch_id"]
+        invoice_date = (
+            payload.invoice_date or datetime.now().date().isoformat()
+        )
+        invoice_no = next_number(
+            db, "purchases", "invoice_no", "PINV-", branch
+        )
+
+        cursor = db.execute("""
+            INSERT INTO purchases
+            (invoice_no,supplier_id,branch_id,invoice_date,supplier_invoice_no,
+             subtotal,discount_amount,taxable_amount,cgst,sgst,igst,total_tax,
+             round_off,grand_total,paid_amount,balance_amount,status,notes,stock_posted)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
+        """, (
+            invoice_no,
+            payload.supplier_id,
+            branch,
+            invoice_date,
+            payload.supplier_invoice_no,
+            subtotal,
+            discount_total,
+            taxable_total,
+            cgst_total,
+            sgst_total,
+            igst_total,
+            tax_total,
+            0,
+            grand_total,
+            0,
+            grand_total,
+            "unpaid",
+            payload.notes,
+        ))
+        purchase_id = cursor.lastrowid
+
+        for entry in calculated:
+            item = entry["item"]
+            receipt_line = entry["receipt_line"]
+
+            purchase_item_cursor = db.execute("""
+                INSERT INTO purchase_items
+                (purchase_id,product_id,quantity,unit_cost,discount_amount,
+                 gst_rate,taxable_amount,tax_amount,line_total)
+                VALUES (?,?,?,?,?,?,?,?,?)
+            """, (
+                purchase_id,
+                receipt_line["product_id"],
+                entry["quantity"],
+                entry["invoice_cost"],
+                entry["discount"],
+                item.gst_rate,
+                entry["taxable"],
+                entry["tax"],
+                entry["line_total"],
+            ))
+
+            allocation_cursor = db.execute("""
+                INSERT INTO purchase_receipt_invoice_lines
+                (purchase_id,purchase_item_id,goods_receipt_item_id,quantity,
+                 receipt_unit_cost,invoice_unit_cost,inventory_variance_allocation)
+                VALUES (?,?,?,?,?,?,?)
+            """, (
+                purchase_id,
+                purchase_item_cursor.lastrowid,
+                item.goods_receipt_item_id,
+                entry["quantity"],
+                entry["receipt_cost"],
+                entry["invoice_cost"],
+                entry["inventory_allocation"],
+            ))
+
+            # Keep purchase-item summary fields synchronized with the
+            # detailed receipt allocation record.
+            full_cost_variance = money(
+                entry["taxable"] - entry["receipt_value"]
+            )
+
+            db.execute("""
+                UPDATE purchase_items
+                SET receipt_allocated_quantity=?,
+                    final_cost_variance=?,
+                    costing_status='costed'
+                WHERE id=? AND purchase_id=?
+            """, (
+                entry["quantity"],
+                full_cost_variance,
+                purchase_item_cursor.lastrowid,
+                purchase_id,
+            ))
+
+            # Accumulate invoiced quantity across multiple supplier invoices.
+            # A receipt line becomes costed only when all accepted quantity
+            # has been invoiced.
+            db.execute("""
+                UPDATE goods_receipt_items
+                SET invoiced_quantity=invoiced_quantity+?,
+                    costing_status=CASE
+                        WHEN invoiced_quantity+? >= accepted_quantity-0.000001
+                        THEN 'costed'
+                        ELSE 'pending'
+                    END
+                WHERE id=?
+            """, (
+                entry["quantity"],
+                entry["quantity"],
+                item.goods_receipt_item_id,
+            ))
+
+            # Revalue only the explicitly allocated amount. Do not alter
+            # physical stock or add the received quantity a second time.
+            if entry["inventory_allocation"] != 0:
+                product_id = receipt_line["product_id"]
+                stock = db.execute("""
+                    SELECT quantity FROM stock_balances
+                    WHERE branch_id=? AND product_id=?
+                """, (branch, product_id)).fetchone()
+
+                cost_balance = db.execute("""
+                    SELECT physical_quantity
+                    FROM inventory_cost_balances
+                    WHERE branch_id=? AND product_id=?
+                """, (branch, product_id)).fetchone()
+
+                if not stock or not cost_balance:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"Cannot revalue product {product_id}: "
+                            "verified WAC and physical stock balances are required."
+                        )
+                    )
+
+                if abs(
+                    float(stock["quantity"])
+                    - float(cost_balance["physical_quantity"])
+                ) > 0.000001:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"Cannot revalue product {product_id}: "
+                            "physical stock and WAC quantities do not match."
+                        )
+                    )
+
+                try:
+                    adjust_inventory_value(
+                        db,
+                        movement_key=(
+                            f"receipt-invoice:{purchase_id}:"
+                            f"allocation:{allocation_cursor.lastrowid}"
+                        ),
+                        branch_id=branch,
+                        product_id=product_id,
+                        value_change=entry["inventory_allocation"],
+                        reason=f"Supplier invoice price variance {invoice_no}",
+                        reference_type="purchase_invoice",
+                        reference_id=purchase_id,
+                        reference_line_id=allocation_cursor.lastrowid,
+                    )
+                except WACError as exc:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Inventory revaluation failed for product {product_id}: {exc}"
+                    )
+
+        # Every line on this invoice is linked to an accepted receipt.
+        # Record the invoice-level allocation and costing completion.
+        db.execute("""
+            UPDATE purchases
+            SET receipt_allocation_status='complete',
+                inventory_cost_status='costed'
+            WHERE id=?
+        """, (purchase_id,))
+
+        account_ids = accounts_map(db)
+        required = [
+            "Inventory",
+            "Goods Received Not Invoiced",
+            "Purchase Price Variance",
+            "Input CGST",
+            "Input SGST",
+            "Input IGST",
+            "Accounts Payable",
+        ]
+        missing = [name for name in required if name not in account_ids]
+        if missing:
+            raise HTTPException(
+                status_code=500,
+                detail="Missing accounting accounts: " + ", ".join(missing)
+            )
+
+        journal_lines = [
+            {
+                "account_id": account_ids["Goods Received Not Invoiced"],
+                "debit": grni_total,
+                "credit": 0,
+                "narration": "Clear goods received not invoiced",
+            },
+        ]
+
+        if inventory_allocation_total > 0:
+            journal_lines.append({
+                "account_id": account_ids["Inventory"],
+                "debit": inventory_allocation_total,
+                "credit": 0,
+                "narration": "Inventory price variance allocation",
+            })
+        elif inventory_allocation_total < 0:
+            journal_lines.append({
+                "account_id": account_ids["Inventory"],
+                "debit": 0,
+                "credit": abs(inventory_allocation_total),
+                "narration": "Inventory price variance allocation",
+            })
+
+        if ppv_total > 0:
+            journal_lines.append({
+                "account_id": account_ids["Purchase Price Variance"],
+                "debit": ppv_total,
+                "credit": 0,
+                "narration": "Unallocated purchase price variance",
+            })
+        elif ppv_total < 0:
+            journal_lines.append({
+                "account_id": account_ids["Purchase Price Variance"],
+                "debit": 0,
+                "credit": abs(ppv_total),
+                "narration": "Unallocated purchase price variance",
+            })
+
+        for name, amount in (
+            ("Input CGST", cgst_total),
+            ("Input SGST", sgst_total),
+            ("Input IGST", igst_total),
+        ):
+            if amount > 0:
+                journal_lines.append({
+                    "account_id": account_ids[name],
+                    "debit": amount,
+                    "credit": 0,
+                    "narration": name,
+                })
+
+        journal_lines.append({
+            "account_id": account_ids["Accounts Payable"],
+            "debit": 0,
+            "credit": grand_total,
+            "narration": "Supplier invoice payable",
+        })
+
+        try:
+            post_journal(
+                db,
+                invoice_date,
+                "PURCHASE_INVOICE_GRNI",
+                f"Supplier invoice {invoice_no} against {receipt['receipt_no']}",
+                "purchase_invoice",
+                purchase_id,
+                journal_lines,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Supplier invoice accounting could not be posted: {exc}"
+            )
+
+    return {
+        "message": (
+            "Supplier invoice posted against accepted goods. "
+            "GRNI cleared, GST and Accounts Payable recorded. "
+            "Stock quantity was not increased again."
+        ),
+        "id": purchase_id,
+        "invoice_no": invoice_no,
+        "goods_receipt_id": payload.goods_receipt_id,
+        "grni_cleared": grni_total,
+        "taxable_amount": taxable_total,
+        "gst_amount": tax_total,
+        "inventory_variance_allocation": inventory_allocation_total,
+        "purchase_price_variance": ppv_total,
+        "grand_total": grand_total,
+        "balance_amount": grand_total,
     }
 
 
@@ -715,18 +1719,30 @@ def add_supplier_payment(
     code = tenant_code(x_tenant_code)
     with tenant_connection(code) as db:
         setup(db)
+        from .finance import setup as finance_setup, post_journal, accounts_map
+        finance_setup(db)
+        db.commit()
+        if payload.payment_method not in ("cash", "upi", "card", "bank_transfer", "cheque"):
+            raise HTTPException(status_code=400, detail="Select a valid supplier payment method.")
         db.execute("BEGIN IMMEDIATE")
         purchase = db.execute(
             "SELECT * FROM purchases WHERE id=?", (payload.purchase_id,)
         ).fetchone()
         if not purchase:
             raise HTTPException(status_code=404, detail="Purchase invoice not found.")
-        if money(payload.amount) > money(purchase["balance_amount"]):
+        outstanding = money(purchase["balance_amount"])
+        if outstanding <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="This invoice has no payable balance. Any negative balance is supplier credit."
+            )
+        if money(payload.amount) > outstanding:
             raise HTTPException(status_code=400, detail="Payment exceeds outstanding balance.")
         branch = purchase["branch_id"]
+        payment_date = payload.payment_date or datetime.now().date().isoformat()
         new_paid = money(purchase["paid_amount"]+payload.amount)
         new_balance = money(purchase["balance_amount"]-payload.amount)
-        db.execute("""
+        payment_cursor = db.execute("""
             INSERT INTO payments
             (party_id,purchase_id,branch_id,payment_type,payment_method,
              amount,reference_no,payment_date,notes)
@@ -734,7 +1750,7 @@ def add_supplier_payment(
         """, (
             purchase["supplier_id"],purchase["id"],branch,
             payload.payment_method,payload.amount,payload.reference_no,
-            payload.payment_date or datetime.now().date().isoformat(),
+            payment_date,
             payload.notes
         ))
         db.execute("""
@@ -745,6 +1761,38 @@ def add_supplier_payment(
             "paid" if new_balance == 0 else "partial",
             purchase["id"]
         ))
+
+        # Post the supplier payment to the general ledger.
+        account_ids = accounts_map(db)
+        payment_account = "Cash" if payload.payment_method == "cash" else "Bank"
+        missing = [
+            name for name in ("Accounts Payable", payment_account)
+            if name not in account_ids
+        ]
+        if missing:
+            raise ValueError("Missing accounting accounts: " + ", ".join(missing))
+
+        payment_amount = money(payload.amount)
+        post_journal(
+            db,
+            payment_date,
+            "PAYMENT",
+            "Supplier payment for purchase invoice " + str(purchase["id"]),
+            "supplier_payment",
+            payment_cursor.lastrowid,
+            [
+                {
+                    "account_id": account_ids["Accounts Payable"],
+                    "debit": payment_amount,
+                    "credit": 0,
+                },
+                {
+                    "account_id": account_ids[payment_account],
+                    "debit": 0,
+                    "credit": payment_amount,
+                },
+            ],
+        )
     return {"message":"Supplier payment recorded.","paid_amount":new_paid,"balance_amount":new_balance}
 
 
@@ -756,32 +1804,121 @@ def create_purchase_return(
     code = tenant_code(x_tenant_code)
     with tenant_connection(code) as db:
         setup(db)
-        branch = branch_id(db)
-        if payload.purchase_id:
-            purchase = db.execute("""
-                SELECT id,supplier_id,branch_id FROM purchases WHERE id=?
-            """, (payload.purchase_id,)).fetchone()
-            if not purchase or purchase["supplier_id"] != payload.supplier_id:
-                raise HTTPException(status_code=404, detail="Related purchase invoice not found.")
-            branch = purchase["branch_id"]
-        return_no = next_number(db,"purchase_returns","return_no","PR-",branch)
+        db.execute("BEGIN IMMEDIATE")
+
+        purchase = db.execute("""
+            SELECT * FROM purchases WHERE id=?
+        """, (payload.purchase_id,)).fetchone()
+
+        if not purchase or purchase["supplier_id"] != payload.supplier_id:
+            raise HTTPException(
+                status_code=404,
+                detail="Related purchase invoice not found for this supplier."
+            )
+
+        branch = purchase["branch_id"]
+        return_no = next_number(db, "purchase_returns", "return_no", "PR-", branch)
         cursor = db.execute("""
             INSERT INTO purchase_returns
             (return_no,purchase_id,supplier_id,branch_id,return_date,reason)
             VALUES (?,?,?,?,?,?)
         """, (
-            return_no,payload.purchase_id,payload.supplier_id,branch,
-            payload.return_date or datetime.now().date().isoformat(),payload.reason
+            return_no, payload.purchase_id, payload.supplier_id, branch,
+            payload.return_date or datetime.now().date().isoformat(),
+            payload.reason
         ))
         return_id = cursor.lastrowid
+
+        # Allocate each requested product quantity to its original invoice
+        # lines. Draft returns reserve quantities too, preventing duplicate drafts.
         for item in payload.items:
-            product_or_404(db,item.product_id)
-            db.execute("""
-                INSERT INTO purchase_return_items
-                (purchase_return_id,product_id,quantity,unit_cost)
-                VALUES (?,?,?,?)
-            """, (return_id,item.product_id,item.quantity,item.unit_cost))
-    return {"message":"Purchase return saved as draft. Stock has not changed.","id":return_id,"return_no":return_no}
+            product_or_404(db, item.product_id)
+
+            source_lines = db.execute("""
+                SELECT * FROM purchase_items
+                WHERE purchase_id=? AND product_id=?
+                ORDER BY id
+            """, (payload.purchase_id, item.product_id)).fetchall()
+
+            if not source_lines:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Product ID {item.product_id} is not on the selected invoice."
+                )
+
+            legacy = db.execute("""
+                SELECT COALESCE(SUM(ri.quantity),0) AS quantity
+                FROM purchase_return_items ri
+                JOIN purchase_returns r ON r.id=ri.purchase_return_id
+                WHERE r.purchase_id=? AND r.status IN ('draft','posted')
+                  AND ri.product_id=? AND ri.original_purchase_item_id IS NULL
+            """, (payload.purchase_id, item.product_id)).fetchone()
+            legacy_remaining = float(legacy["quantity"] or 0)
+            quantity_left = float(item.quantity)
+
+            for source in source_lines:
+                allocated = db.execute("""
+                    SELECT COALESCE(SUM(quantity),0) AS quantity
+                    FROM purchase_return_items
+                    WHERE original_purchase_item_id=?
+                """, (source["id"],)).fetchone()
+                already_allocated = float(allocated["quantity"] or 0)
+
+                source_quantity = float(source["quantity"] or 0)
+                # Older returns without source-line references are consumed
+                # against invoice lines in their original order.
+                legacy_for_line = min(
+                    legacy_remaining,
+                    max(0.0, source_quantity - already_allocated)
+                )
+                legacy_remaining -= legacy_for_line
+                available = max(
+                    0.0,
+                    source_quantity - already_allocated - legacy_for_line
+                )
+                take = min(quantity_left, available)
+
+                if take <= 0.000001:
+                    continue
+
+                source_unit_cost = float(source["unit_cost"] or 0)
+                source_taxable = float(source["taxable_amount"] or 0)
+                inventory_unit_cost = (
+                    source_taxable / source_quantity
+                    if source_quantity > 0 and source_taxable > 0
+                    else source_unit_cost
+                )
+
+                db.execute("""
+                    INSERT INTO purchase_return_items
+                    (purchase_return_id,product_id,quantity,unit_cost,
+                     original_purchase_item_id,inventory_unit_cost,
+                     supplier_credit_total,cost_variance,costing_status)
+                    VALUES (?,?,?,?,?,?,0,0,'invoice_cost')
+                """, (
+                    return_id, item.product_id, take, source_unit_cost,
+                    source["id"], inventory_unit_cost
+                ))
+                quantity_left -= take
+
+                if quantity_left <= 0.000001:
+                    break
+
+            if quantity_left > 0.000001:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Return quantity exceeds the remaining quantity on "
+                        f"purchase invoice {purchase['invoice_no']} for product "
+                        f"ID {item.product_id}."
+                    )
+                )
+
+    return {
+        "message": "Purchase return saved as draft. Original invoice quantities are reserved.",
+        "id": return_id,
+        "return_no": return_no
+    }
 
 
 @router.post("/purchase-returns/{return_id}/post")
@@ -792,6 +1929,10 @@ def post_purchase_return(
     code = tenant_code(x_tenant_code)
     with tenant_connection(code) as db:
         setup(db)
+        from .finance import setup as finance_setup, post_journal, accounts_map
+
+        finance_setup(db)
+        db.commit()
         db.execute("BEGIN IMMEDIATE")
 
         record = db.execute(
@@ -802,111 +1943,260 @@ def post_purchase_return(
             raise HTTPException(status_code=404, detail="Purchase return not found.")
         if record["status"] == "posted":
             raise HTTPException(status_code=409, detail="Return already posted.")
+        if not record["purchase_id"]:
+            raise HTTPException(
+                status_code=400,
+                detail="A purchase return must be linked to its original invoice."
+            )
 
-        items = db.execute(
-            "SELECT * FROM purchase_return_items WHERE purchase_return_id=?",
-            (return_id,)
-        ).fetchall()
+        purchase = db.execute("""
+            SELECT * FROM purchases WHERE id=?
+        """, (record["purchase_id"],)).fetchone()
+
+        if (
+            not purchase
+            or purchase["supplier_id"] != record["supplier_id"]
+            or purchase["branch_id"] != record["branch_id"]
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="The linked purchase invoice does not match this return."
+            )
+
+        items = db.execute("""
+            SELECT ri.*, pi.quantity AS source_quantity,
+                   pi.unit_cost AS source_unit_cost,
+                   pi.discount_amount AS source_discount,
+                   pi.gst_rate AS source_gst_rate,
+                   pi.taxable_amount AS source_taxable,
+                   pi.tax_amount AS source_tax
+            FROM purchase_return_items ri
+            LEFT JOIN purchase_items pi
+              ON pi.id=ri.original_purchase_item_id
+            WHERE ri.purchase_return_id=?
+            ORDER BY ri.id
+        """, (return_id,)).fetchall()
 
         if not items:
             raise HTTPException(status_code=400, detail="Return has no items.")
 
-        # If linked to an invoice, never allow returns beyond its
-        # purchased quantity less quantities already returned.
-        if record["purchase_id"]:
-            purchase = db.execute("""
-                SELECT id, supplier_id, branch_id
-                FROM purchases
-                WHERE id=?
-            """, (record["purchase_id"],)).fetchone()
+        total_taxable = 0.0
+        total_input_tax = 0.0
+        stock_quantities = {}
 
-            if (
-                not purchase
-                or purchase["supplier_id"] != record["supplier_id"]
-                or purchase["branch_id"] != record["branch_id"]
-            ):
+        for item in items:
+            if item["original_purchase_item_id"] is None or not item["source_quantity"]:
                 raise HTTPException(
                     status_code=400,
-                    detail="The linked purchase invoice does not match this return."
+                    detail="A return line is missing its original purchase invoice allocation."
                 )
 
-            requested = {}
-            for item in items:
-                product_id = item["product_id"]
-                requested[product_id] = (
-                    requested.get(product_id, 0) + float(item["quantity"])
+            source_quantity = float(item["source_quantity"])
+            return_quantity = float(item["quantity"])
+            if return_quantity > source_quantity + 0.000001:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Return quantity exceeds its original purchase line."
                 )
 
-            for product_id, return_quantity in requested.items():
-                purchased = db.execute("""
-                    SELECT COALESCE(SUM(quantity), 0) AS quantity
-                    FROM purchase_items
-                    WHERE purchase_id=? AND product_id=?
-                """, (record["purchase_id"], product_id)).fetchone()
+            taxable_source = float(item["source_taxable"] or 0)
+            if taxable_source > 0:
+                taxable = money(taxable_source * return_quantity / source_quantity)
+            else:
+                gross_base = (
+                    float(item["source_unit_cost"] or 0) * source_quantity
+                    - float(item["source_discount"] or 0)
+                )
+                taxable = money(max(0, gross_base) * return_quantity / source_quantity)
 
-                already_returned = db.execute("""
-                    SELECT COALESCE(SUM(ri.quantity), 0) AS quantity
-                    FROM purchase_return_items ri
-                    JOIN purchase_returns r
-                      ON r.id=ri.purchase_return_id
-                    WHERE r.purchase_id=?
-                      AND r.status='posted'
-                      AND ri.product_id=?
-                """, (record["purchase_id"], product_id)).fetchone()
+            tax_source = float(item["source_tax"] or 0)
+            if tax_source > 0:
+                input_tax = money(tax_source * return_quantity / source_quantity)
+            else:
+                input_tax = money(
+                    taxable * float(item["source_gst_rate"] or 0) / 100
+                )
 
-                purchased_quantity = float(purchased["quantity"])
-                previous_returns = float(already_returned["quantity"])
+            total_taxable = money(total_taxable + taxable)
+            total_input_tax = money(total_input_tax + input_tax)
+            stock_quantities[item["product_id"]] = (
+                stock_quantities.get(item["product_id"], 0.0) + return_quantity
+            )
 
-                if return_quantity + previous_returns > purchased_quantity + 0.000001:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            f"Return exceeds the remaining purchased quantity "
-                            f"for product ID {product_id}. Purchased: "
-                            f"{purchased_quantity}, already returned: "
-                            f"{previous_returns}, requested now: {return_quantity}."
-                        )
-                    )
+        return_total = money(total_taxable + total_input_tax)
+        if return_total <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="The calculated supplier credit is zero; this return cannot be posted."
+            )
 
-        # Stock must also be available before it can be returned.
-        for item in items:
+        # Verify stock availability before changing any quantities.
+        stock_rows = {}
+        for product_id, quantity in stock_quantities.items():
             stock = db.execute("""
                 SELECT quantity FROM stock_balances
                 WHERE branch_id=? AND product_id=?
-            """, (record["branch_id"], item["product_id"])).fetchone()
-
-            available = float(stock["quantity"]) if stock else 0
-
-            if item["quantity"] > available + 0.000001:
+            """, (record["branch_id"], product_id)).fetchone()
+            available = float(stock["quantity"]) if stock else 0.0
+            if quantity > available + 0.000001:
                 raise HTTPException(
                     status_code=400,
-                    detail="Return quantity exceeds available stock."
+                    detail=f"Return quantity exceeds available stock for product ID {product_id}."
+                )
+            stock_rows[product_id] = available
+
+        # Reverse the GST using the tax split recorded on the original invoice.
+        original_cgst = money(purchase["cgst"] or 0)
+        original_sgst = money(purchase["sgst"] or 0)
+        original_igst = money(purchase["igst"] or 0)
+
+        reverse_igst = 0.0
+        reverse_cgst = 0.0
+        reverse_sgst = 0.0
+
+        if total_input_tax > 0:
+            if original_igst > 0:
+                reverse_igst = total_input_tax
+            elif original_cgst + original_sgst > 0:
+                reverse_cgst = money(
+                    total_input_tax * original_cgst /
+                    (original_cgst + original_sgst)
+                )
+                reverse_sgst = money(total_input_tax - reverse_cgst)
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Original invoice GST split is unavailable; return was not posted."
                 )
 
-            remaining = money(available - item["quantity"])
+        account_ids = accounts_map(db)
+        required_accounts = ["Accounts Payable", "Inventory"]
+        if reverse_cgst > 0:
+            required_accounts.append("Input CGST")
+        if reverse_sgst > 0:
+            required_accounts.append("Input SGST")
+        if reverse_igst > 0:
+            required_accounts.append("Input IGST")
 
+        missing = [name for name in required_accounts if name not in account_ids]
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail="Missing accounting accounts: " + ", ".join(missing)
+            )
+
+        journal_lines = [{
+            "account_id": account_ids["Accounts Payable"],
+            "debit": return_total,
+            "credit": 0,
+            "narration": "Supplier credit for purchase return"
+        }, {
+            "account_id": account_ids["Inventory"],
+            "debit": 0,
+            "credit": total_taxable,
+            "narration": "Inventory returned to supplier"
+        }]
+
+        if reverse_cgst > 0:
+            journal_lines.append({
+                "account_id": account_ids["Input CGST"],
+                "debit": 0,
+                "credit": reverse_cgst,
+                "narration": "Reverse input CGST on purchase return"
+            })
+        if reverse_sgst > 0:
+            journal_lines.append({
+                "account_id": account_ids["Input SGST"],
+                "debit": 0,
+                "credit": reverse_sgst,
+                "narration": "Reverse input SGST on purchase return"
+            })
+        if reverse_igst > 0:
+            journal_lines.append({
+                "account_id": account_ids["Input IGST"],
+                "debit": 0,
+                "credit": reverse_igst,
+                "narration": "Reverse input IGST on purchase return"
+            })
+
+        # Supplier credit reduces the invoice balance. A negative balance
+        # represents credit due from the supplier; it is not a cash refund.
+        new_balance = money(float(purchase["balance_amount"] or 0) - return_total)
+        paid_amount = money(purchase["paid_amount"] or 0)
+        if new_balance < 0:
+            new_status = "credit"
+        elif new_balance == 0:
+            new_status = "paid"
+        elif paid_amount > 0:
+            new_status = "partial"
+        else:
+            new_status = "unpaid"
+
+        for product_id, quantity in stock_quantities.items():
+            remaining = money(stock_rows[product_id] - quantity)
             db.execute("""
                 UPDATE stock_balances
                 SET quantity=?, updated_at=CURRENT_TIMESTAMP
                 WHERE branch_id=? AND product_id=?
-            """, (remaining, record["branch_id"], item["product_id"]))
+            """, (remaining, record["branch_id"], product_id))
 
+            cost_total = 0.0
+            cost_quantity = 0.0
+            for item in items:
+                if item["product_id"] == product_id:
+                    source_qty = float(item["source_quantity"])
+                    source_taxable = float(item["source_taxable"] or 0)
+                    source_cost = (
+                        source_taxable / source_qty
+                        if source_taxable > 0 and source_qty > 0
+                        else float(item["source_unit_cost"] or 0)
+                    )
+                    cost_total += source_cost * float(item["quantity"])
+                    cost_quantity += float(item["quantity"])
+
+            average_cost = (
+                money(cost_total / cost_quantity) if cost_quantity else 0
+            )
             db.execute("""
                 INSERT INTO stock_ledger
                 (branch_id,product_id,transaction_type,reference_type,reference_id,
                  quantity_in,quantity_out,balance_after,unit_cost,notes)
                 VALUES (?,?, 'purchase_return','purchase_return',?,0,?,?,?,?)
             """, (
-                record["branch_id"], item["product_id"], return_id,
-                item["quantity"], remaining, item["unit_cost"], record["return_no"]
+                record["branch_id"], product_id, return_id,
+                quantity, remaining, average_cost, record["return_no"]
             ))
+
+        db.execute("""
+            UPDATE purchases
+            SET balance_amount=?, status=?
+            WHERE id=?
+        """, (new_balance, new_status, purchase["id"]))
+
+        post_journal(
+            db,
+            record["return_date"],
+            "PURCHASE_RETURN",
+            "Supplier purchase return " + str(record["return_no"]),
+            "purchase_return",
+            return_id,
+            journal_lines
+        )
 
         db.execute(
             "UPDATE purchase_returns SET status='posted' WHERE id=?",
             (return_id,)
         )
 
-    return {"message": "Purchase return posted. Stock reduced."}
+    return {
+        "message": "Purchase return posted. Stock reduced, GST reversed and supplier credit recorded.",
+        "return_id": return_id,
+        "supplier_credit": return_total,
+        "taxable_value": total_taxable,
+        "input_gst_reversed": total_input_tax,
+        "invoice_balance": new_balance,
+        "invoice_status": new_status
+    }
 
 
 @router.get("/purchase-reports")
@@ -919,7 +2209,8 @@ def purchase_reports(x_tenant_code: Optional[str] = Header(None)):
                    COUNT(*) AS invoices,
                    COALESCE(SUM(grand_total),0) AS total,
                    COALESCE(SUM(paid_amount),0) AS paid,
-                   COALESCE(SUM(balance_amount),0) AS outstanding
+                   COALESCE(SUM(CASE WHEN balance_amount > 0 THEN balance_amount ELSE 0 END),0) AS outstanding,
+                   COALESCE(SUM(CASE WHEN balance_amount < 0 THEN -balance_amount ELSE 0 END),0) AS supplier_credit
             FROM purchases GROUP BY substr(invoice_date,1,7)
             ORDER BY month DESC LIMIT 24
         """).fetchall()
@@ -927,7 +2218,8 @@ def purchase_reports(x_tenant_code: Optional[str] = Header(None)):
             SELECT p.id,p.name,
                    COUNT(pu.id) invoices,
                    COALESCE(SUM(pu.grand_total),0) purchase_value,
-                   COALESCE(SUM(pu.balance_amount),0) outstanding
+                   COALESCE(SUM(CASE WHEN pu.balance_amount > 0 THEN pu.balance_amount ELSE 0 END),0) outstanding,
+                   COALESCE(SUM(CASE WHEN pu.balance_amount < 0 THEN -pu.balance_amount ELSE 0 END),0) supplier_credit
             FROM parties p LEFT JOIN purchases pu ON pu.supplier_id=p.id
             WHERE p.party_type IN ('supplier','both')
             GROUP BY p.id ORDER BY purchase_value DESC

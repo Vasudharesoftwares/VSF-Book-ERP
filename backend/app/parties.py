@@ -55,7 +55,19 @@ def list_parties(
     x_tenant_code: Optional[str] = Header(None)
 ):
     code = party_tenant(x_tenant_code)
-    sql = "SELECT * FROM parties WHERE is_active=1"
+    sql = """
+        SELECT p.*,
+            COALESCE((
+                SELECT SUM(CASE WHEN pu.balance_amount > 0 THEN pu.balance_amount ELSE 0 END)
+                FROM purchases pu WHERE pu.supplier_id=p.id
+            ),0) AS payable_balance,
+            COALESCE((
+                SELECT SUM(CASE WHEN pu.balance_amount < 0 THEN -pu.balance_amount ELSE 0 END)
+                FROM purchases pu WHERE pu.supplier_id=p.id
+            ),0) AS supplier_credit
+        FROM parties p
+        WHERE p.is_active=1
+    """
     params = []
     if party_type:
         sql += " AND party_type IN (?, 'both')"

@@ -48,6 +48,15 @@ export default function PurchasesPage({ tenant }) {
     item: { ...emptyLine }
   });
 
+  const [receiptInvoiceForm, setReceiptInvoiceForm] = useState({
+    goods_receipt_id: "",
+    supplier_id: "",
+    invoice_date: today(),
+    supplier_invoice_no: "",
+    notes: "",
+    items: []
+  });
+
   const [paymentForm, setPaymentForm] = useState({
     purchase_id: "", amount: "", payment_method: "cash",
     payment_date: today(), reference_no: "", notes: ""
@@ -168,6 +177,103 @@ export default function PurchasesPage({ tenant }) {
     setShowForm(name);
   }
 
+  async function openReceiptInvoice(receiptId) {
+    setError("");
+    setMessage("");
+    try {
+      const receipt = await request(`/goods-receipts/${receiptId}`);
+      if (receipt.status !== "accepted") {
+        throw new Error("Only accepted goods receipts can be invoiced.");
+      }
+
+      const availableItems = (receipt.items || [])
+        .filter(item => Number(item.remaining_quantity) > 0)
+        .map(item => {
+          const product = productOptions.find(
+            p => Number(p.id) === Number(item.product_id)
+          );
+          return {
+            goods_receipt_item_id: item.id,
+            product_name: item.product_name,
+            sku: item.sku || "",
+            accepted_quantity: item.accepted_quantity,
+            already_invoiced: item.invoiced_quantity || 0,
+            remaining_quantity: item.remaining_quantity,
+            quantity: String(item.remaining_quantity),
+            unit_cost: String(item.unit_cost || 0),
+            gst_rate: String(product?.gst_rate ?? 0),
+            discount_amount: "0",
+            inventory_variance_allocation: "0"
+          };
+        });
+
+      if (!availableItems.length) {
+        throw new Error("All accepted quantities on this receipt have already been invoiced.");
+      }
+
+      setReceiptInvoiceForm({
+        goods_receipt_id: String(receipt.id),
+        supplier_id: String(receipt.supplier_id),
+        invoice_date: today(),
+        supplier_invoice_no: "",
+        notes: "",
+        items: availableItems
+      });
+      setShowForm("receipt-invoice");
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
+  function changeReceiptInvoiceLine(index, key, value) {
+    setReceiptInvoiceForm(previous => ({
+      ...previous,
+      items: previous.items.map((item, i) =>
+        i === index ? { ...item, [key]: value } : item
+      )
+    }));
+  }
+
+  async function submitReceiptInvoice(event) {
+    event.preventDefault();
+    const items = receiptInvoiceForm.items
+      .filter(item => Number(item.quantity) > 0);
+
+    if (!items.length) {
+      setError("Enter an invoice quantity for at least one receipt line.");
+      return;
+    }
+
+    for (const item of items) {
+      if (Number(item.quantity) > Number(item.remaining_quantity) + 0.000001) {
+        setError(`Invoice quantity exceeds the uninvoiced quantity for ${item.product_name}.`);
+        return;
+      }
+      if (Number(item.unit_cost) <= 0) {
+        setError(`Enter a positive invoice unit cost for ${item.product_name}.`);
+        return;
+      }
+    }
+
+    await submit("/purchases/from-goods-receipt", {
+      goods_receipt_id: Number(receiptInvoiceForm.goods_receipt_id),
+      supplier_id: Number(receiptInvoiceForm.supplier_id),
+      invoice_date: receiptInvoiceForm.invoice_date,
+      supplier_invoice_no: receiptInvoiceForm.supplier_invoice_no,
+      notes: receiptInvoiceForm.notes,
+      items: items.map(item => ({
+        goods_receipt_item_id: Number(item.goods_receipt_item_id),
+        quantity: Number(item.quantity),
+        unit_cost: Number(item.unit_cost),
+        gst_rate: Number(item.gst_rate),
+        discount_amount: Number(item.discount_amount),
+        inventory_variance_allocation: Number(item.inventory_variance_allocation)
+      }))
+    }, "Supplier invoice posted against the accepted goods receipt.");
+  }
+
+
+
   const tabs = [
     ["Dashboard", BarChart3],
     ["Purchase Orders", ShoppingCart],
@@ -215,6 +321,7 @@ export default function PurchasesPage({ tenant }) {
               ["Purchase Invoices", dashboard.purchase_invoices, Receipt],
               ["Purchase Value", money(dashboard.purchase_value), BarChart3],
               ["Supplier Payable", money(dashboard.supplier_payable), Wallet],
+              ["Supplier Credit", money(dashboard.supplier_credit), Wallet],
               ["Purchase Returns", dashboard.returns, RotateCcw]
             ].map(([label, value, Icon]) => (
               <div className="stat-card" key={label}>
@@ -331,9 +438,89 @@ export default function PurchasesPage({ tenant }) {
               </form>
             </div>
           )}
+          {showForm === "receipt-invoice" && (
+            <div className="data-panel">
+              <h2>Create Supplier Invoice Against Accepted Receipt</h2>
+              <p className="purchase-hint">
+                This records the supplier bill, GST, GRNI settlement and price variance.
+                It does not add stock again.
+              </p>
+              <form onSubmit={submitReceiptInvoice}>
+                <div className="form-grid">
+                  <label>Supplier
+                    <input value={supplierName(receiptInvoiceForm.supplier_id)} readOnly />
+                  </label>
+                  <label>Invoice date
+                    <input type="date" required value={receiptInvoiceForm.invoice_date}
+                      onChange={e=>setReceiptInvoiceForm({...receiptInvoiceForm,invoice_date:e.target.value})}/>
+                  </label>
+                  <label>Supplier invoice number
+                    <input value={receiptInvoiceForm.supplier_invoice_no}
+                      onChange={e=>setReceiptInvoiceForm({...receiptInvoiceForm,supplier_invoice_no:e.target.value})}/>
+                  </label>
+                  <label>Notes
+                    <input value={receiptInvoiceForm.notes}
+                      onChange={e=>setReceiptInvoiceForm({...receiptInvoiceForm,notes:e.target.value})}/>
+                  </label>
+                </div>
+
+                <h3>Accepted receipt lines</h3>
+                {receiptInvoiceForm.items.map((item,index)=>(
+                  <div className="data-panel" key={item.goods_receipt_item_id}>
+                    <h3>{item.product_name} {item.sku ? `(${item.sku})` : ""}</h3>
+                    <p className="purchase-hint">
+                      Accepted: {item.accepted_quantity} · Already invoiced: {item.already_invoiced} · Remaining: {item.remaining_quantity}
+                    </p>
+                    <div className="form-grid">
+                      <label>Invoice quantity
+                        <input type="number" min="0" max={item.remaining_quantity} step="any"
+                          value={item.quantity}
+                          onChange={e=>changeReceiptInvoiceLine(index,"quantity",e.target.value)}/>
+                      </label>
+                      <label>Invoice unit cost
+                        <input type="number" min="0.01" step="0.01" required
+                          value={item.unit_cost}
+                          onChange={e=>changeReceiptInvoiceLine(index,"unit_cost",e.target.value)}/>
+                      </label>
+                      <label>GST %
+                        <input type="number" min="0" step="0.01"
+                          value={item.gst_rate}
+                          onChange={e=>changeReceiptInvoiceLine(index,"gst_rate",e.target.value)}/>
+                      </label>
+                      <label>Discount amount
+                        <input type="number" min="0" step="0.01"
+                          value={item.discount_amount}
+                          onChange={e=>changeReceiptInvoiceLine(index,"discount_amount",e.target.value)}/>
+                      </label>
+                      <label>Inventory variance allocation
+                        <input type="number" step="0.01"
+                          value={item.inventory_variance_allocation}
+                          onChange={e=>changeReceiptInvoiceLine(index,"inventory_variance_allocation",e.target.value)}/>
+                      </label>
+                    </div>
+                  </div>
+                ))}
+
+                <p className="purchase-hint">
+                  Leave a line quantity at zero to exclude it from this invoice.
+                  The unallocated price variance is posted to Purchase Price Variance.
+                  Supplier payments can be recorded separately under Supplier Payments.
+                </p>
+                <div className="purchase-form-actions">
+                  <button className="primary-action">Post Supplier Invoice</button>
+                  <button type="button" className="secondary-action"
+                    onClick={()=>setShowForm(false)}>Cancel</button>
+                </div>
+              </form>
+            </div>
+          )}
           <div className="data-panel">
             <table className="erp-table"><thead><tr><th>Receipt</th><th>Date</th><th>Supplier</th><th>Received</th><th>Accepted</th><th>Status</th><th>Action</th></tr></thead>
-              <tbody>{receipts.map(r=><tr key={r.id}><td>{r.receipt_no}</td><td>{r.receipt_date}</td><td>{r.supplier_name}</td><td>{r.received_quantity}</td><td>{r.accepted_quantity}</td><td><Status value={r.status}/></td><td>{r.status==="draft" ? <button className="secondary-action" onClick={()=>submit(`/goods-receipts/${r.id}/accept`,{},"Receipt accepted.")}>Accept & Post Stock</button> : "—"}</td></tr>)}</tbody></table>
+              <tbody>{receipts.map(r=><tr key={r.id}><td>{r.receipt_no}</td><td>{r.receipt_date}</td><td>{r.supplier_name}</td><td>{r.received_quantity}</td><td>{r.accepted_quantity}</td><td><Status value={r.status}/></td><td>{r.status==="draft"
+                ? <button className="secondary-action" onClick={()=>submit(`/goods-receipts/${r.id}/accept`,{},"Receipt accepted.")}>Accept & Post Stock</button>
+                : r.status==="accepted"
+                  ? <button className="secondary-action" onClick={()=>openReceiptInvoice(r.id)}>Create Supplier Invoice</button>
+                  : "—"}</td></tr>)}</tbody></table>
             {!receipts.length&&<div className="empty-state">No goods receipts found.</div>}
           </div>
         </>
@@ -366,7 +553,16 @@ export default function PurchasesPage({ tenant }) {
                   <label>Supplier<select required value={invoiceForm.supplier_id} onChange={e=>setInvoiceForm({...invoiceForm,supplier_id:e.target.value})}><option value="">Select supplier</option>{supplierOptions.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select></label>
                   <label>Invoice date<input type="date" value={invoiceForm.invoice_date} onChange={e=>setInvoiceForm({...invoiceForm,invoice_date:e.target.value})}/></label>
                   <label>Supplier invoice number<input value={invoiceForm.supplier_invoice_no} onChange={e=>setInvoiceForm({...invoiceForm,supplier_invoice_no:e.target.value})}/></label>
-                  <label>Product<select required value={invoiceForm.item.product_id} onChange={e=>changeLine(setInvoiceForm,"product_id",e.target.value)}><option value="">Select product</option>{productOptions.map(p=><option key={p.id} value={p.id}>{p.name} ({p.sku})</option>)}</select></label>
+                  <label>Product<select required value={invoiceForm.item.product_id} onChange={e=>{
+                    const id=e.target.value;
+                    const product=productOptions.find(p=>Number(p.id)===Number(id));
+                    setInvoiceForm(previous=>({...previous,item:{
+                      ...previous.item,
+                      product_id:id,
+                      gst_rate:product?String(product.gst_rate??0):"0",
+                      unit_cost:product?String(product.purchase_price??0):"0"
+                    }}));
+                  }}><option value="">Select product</option>{productOptions.map(p=><option key={p.id} value={p.id}>{p.name} ({p.sku})</option>)}</select></label>
                   <label>Quantity<input type="number" min="0.001" step="any" required value={invoiceForm.item.quantity} onChange={e=>changeLine(setInvoiceForm,"quantity",e.target.value)}/></label>
                   <label>Unit cost<input type="number" min="0" step="0.01" required value={invoiceForm.item.unit_cost} onChange={e=>changeLine(setInvoiceForm,"unit_cost",e.target.value)}/></label>
                   <label>GST %<input type="number" min="0" step="0.01" value={invoiceForm.item.gst_rate} onChange={e=>changeLine(setInvoiceForm,"gst_rate",e.target.value)}/></label>
@@ -394,10 +590,10 @@ export default function PurchasesPage({ tenant }) {
               reference_no:paymentForm.reference_no,notes:paymentForm.notes
             },"Supplier payment recorded.");}}>
               <div className="form-grid">
-                <label>Purchase invoice<select required value={paymentForm.purchase_id} onChange={e=>setPaymentForm({...paymentForm,purchase_id:e.target.value})}><option value="">Select outstanding invoice</option>{invoices.filter(p=>Number(p.balance_amount)>0).map(p=><option key={p.id} value={p.id}>{p.invoice_no} — {p.supplier_name} — Due {money(p.balance_amount)}</option>)}</select></label>
+                <label>Purchase invoice<select required value={paymentForm.purchase_id} onChange={e=>setPaymentForm({...paymentForm,purchase_id:e.target.value})}><option value="">Select payable invoice</option>{invoices.filter(p=>Number(p.balance_amount)>0).map(p=><option key={p.id} value={p.id}>{p.invoice_no} — {p.supplier_name} — Due {money(p.balance_amount)}</option>)}</select></label>
                 <label>Payment amount<input type="number" min="0.01" step="0.01" required value={paymentForm.amount} onChange={e=>setPaymentForm({...paymentForm,amount:e.target.value})}/></label>
                 <label>Payment date<input type="date" value={paymentForm.payment_date} onChange={e=>setPaymentForm({...paymentForm,payment_date:e.target.value})}/></label>
-                <label>Payment method<select value={paymentForm.payment_method} onChange={e=>setPaymentForm({...paymentForm,payment_method:e.target.value})}>{["cash","upi","card","bank_transfer","cheque","credit","other"].map(x=><option key={x}>{x}</option>)}</select></label>
+                <label>Payment method<select value={paymentForm.payment_method} onChange={e=>setPaymentForm({...paymentForm,payment_method:e.target.value})}>{["cash","upi","card","bank_transfer","cheque"].map(x=><option key={x}>{x.replace("_"," ")}</option>)}</select></label>
                 <label>Reference number<input value={paymentForm.reference_no} onChange={e=>setPaymentForm({...paymentForm,reference_no:e.target.value})}/></label>
                 <label>Notes<input value={paymentForm.notes} onChange={e=>setPaymentForm({...paymentForm,notes:e.target.value})}/></label>
               </div>
@@ -405,6 +601,7 @@ export default function PurchasesPage({ tenant }) {
             </form>
           </div>
           <div className="data-panel"><h2>Outstanding Invoices</h2><InvoiceTable invoices={invoices.filter(p=>Number(p.balance_amount)>0)}/></div>
+          <div className="data-panel"><h2>Supplier Credits</h2><p className="purchase-hint">Credits created by purchase returns are shown separately. They cannot be recorded as cash payments.</p><InvoiceTable invoices={invoices.filter(p=>Number(p.balance_amount)<0)}/></div>
         </>
       )}
 
@@ -430,17 +627,17 @@ export default function PurchasesPage({ tenant }) {
             }}>
               <div className="form-grid">
                 <label>Supplier<select required value={returnForm.supplier_id} onChange={e=>setReturnForm({...returnForm,supplier_id:e.target.value,purchase_id:""})}><option value="">Select supplier</option>{supplierOptions.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select></label>
-                <label>Related purchase invoice (optional)<select value={returnForm.purchase_id} onChange={e=>{
+                <label>Related purchase invoice<select required value={returnForm.purchase_id} onChange={e=>{
                   const p=invoices.find(x=>String(x.id)===e.target.value);
                   setReturnForm({...returnForm,purchase_id:e.target.value,product_id:"",unit_cost:0});
-                }}><option value="">Not linked to invoice</option>{invoices.filter(p=>String(p.supplier_id)===String(returnForm.supplier_id)).map(p=><option key={p.id} value={p.id}>{p.invoice_no}</option>)}</select></label>
+                }}>{invoices.filter(p=>String(p.supplier_id)===String(returnForm.supplier_id)).map(p=><option key={p.id} value={p.id}>{p.invoice_no}</option>)}</select></label>
                 <label>Return date<input type="date" value={returnForm.return_date} onChange={e=>setReturnForm({...returnForm,return_date:e.target.value})}/></label>
                 <label>Product<select required value={returnForm.product_id} onChange={e=>setReturnForm({...returnForm,product_id:e.target.value})}><option value="">Select product</option>{productOptions.map(p=><option key={p.id} value={p.id}>{p.name} ({p.sku})</option>)}</select></label>
                 <label>Quantity<input type="number" min="0.001" step="any" required value={returnForm.quantity} onChange={e=>setReturnForm({...returnForm,quantity:e.target.value})}/></label>
-                <label>Unit cost<input type="number" min="0" step="0.01" value={returnForm.unit_cost} onChange={e=>setReturnForm({...returnForm,unit_cost:e.target.value})}/></label>
+                <p className="purchase-hint">Unit cost and GST are calculated from the selected purchase invoice.</p>
                 <label>Reason<input value={returnForm.reason} onChange={e=>setReturnForm({...returnForm,reason:e.target.value})}/></label>
               </div>
-              <p className="purchase-hint">This action posts the return immediately and reduces available stock. Check the details before submitting.</p>
+              <p className="purchase-hint">This posts the return immediately, reduces stock, reverses input GST and records supplier credit against the selected invoice.</p>
               <div className="purchase-form-actions"><button className="primary-action">Create & Post Return</button></div>
             </form>
           </div>
@@ -450,13 +647,13 @@ export default function PurchasesPage({ tenant }) {
       {tab === "Reports" && (
         <>
           <div className="data-panel"><h2>Monthly Purchase Summary</h2>
-            <table className="erp-table"><thead><tr><th>Month</th><th>Invoices</th><th>Total</th><th>Paid</th><th>Outstanding</th></tr></thead>
-              <tbody>{reports.monthly.map((r,i)=><tr key={r.month||i}><td>{r.month}</td><td>{r.invoices}</td><td>{money(r.total)}</td><td>{money(r.paid)}</td><td>{money(r.outstanding)}</td></tr>)}</tbody></table>
+            <table className="erp-table"><thead><tr><th>Month</th><th>Invoices</th><th>Total</th><th>Paid</th><th>Outstanding</th><th>Supplier Credit</th></tr></thead>
+              <tbody>{reports.monthly.map((r,i)=><tr key={r.month||i}><td>{r.month}</td><td>{r.invoices}</td><td>{money(r.total)}</td><td>{money(r.paid)}</td><td>{money(r.outstanding)}</td><td>{money(r.supplier_credit)}</td></tr>)}</tbody></table>
             {!reports.monthly.length&&<div className="empty-state">No purchase report data available.</div>}
           </div>
           <div className="data-panel"><h2>Supplier Purchase Summary</h2>
-            <table className="erp-table"><thead><tr><th>Supplier</th><th>Invoices</th><th>Purchase Value</th><th>Outstanding</th></tr></thead>
-              <tbody>{reports.suppliers.map(s=><tr key={s.id}><td>{s.name}</td><td>{s.invoices}</td><td>{money(s.purchase_value)}</td><td>{money(s.outstanding)}</td></tr>)}</tbody></table>
+            <table className="erp-table"><thead><tr><th>Supplier</th><th>Invoices</th><th>Purchase Value</th><th>Outstanding</th><th>Supplier Credit</th></tr></thead>
+              <tbody>{reports.suppliers.map(s=><tr key={s.id}><td>{s.name}</td><td>{s.invoices}</td><td>{money(s.purchase_value)}</td><td>{money(s.outstanding)}</td><td>{money(s.supplier_credit)}</td></tr>)}</tbody></table>
             {!reports.suppliers.length&&<div className="empty-state">No suppliers found.</div>}
           </div>
         </>
@@ -471,8 +668,16 @@ function Status({ value }) {
 
 function InvoiceTable({ invoices }) {
   return <>
-    <table className="erp-table"><thead><tr><th>Invoice</th><th>Date</th><th>Supplier</th><th>Total</th><th>Paid</th><th>Balance</th><th>Status</th></tr></thead>
-      <tbody>{invoices.map(p=><tr key={p.id}><td>{p.invoice_no}</td><td>{p.invoice_date}</td><td>{p.supplier_name}</td><td>{money(p.grand_total)}</td><td>{money(p.paid_amount)}</td><td>{money(p.balance_amount)}</td><td><Status value={p.status}/></td></tr>)}</tbody></table>
+    <table className="erp-table"><thead><tr><th>Invoice</th><th>Date</th><th>Supplier</th><th>Total</th><th>Paid</th><th>Payable / Credit</th><th>Status</th></tr></thead>
+      <tbody>{invoices.map(p=>{
+        const balance = Number(p.balance_amount || 0);
+        return <tr key={p.id}>
+          <td>{p.invoice_no}</td><td>{p.invoice_date}</td><td>{p.supplier_name}</td>
+          <td>{money(p.grand_total)}</td><td>{money(p.paid_amount)}</td>
+          <td>{balance < 0 ? `Credit ${money(Math.abs(balance))}` : money(balance)}</td>
+          <td><Status value={p.status}/></td>
+        </tr>;
+      })}</tbody></table>
     {!invoices.length&&<div className="empty-state">No purchase invoices found.</div>}
   </>;
 }

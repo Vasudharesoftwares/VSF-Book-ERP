@@ -103,6 +103,9 @@ def setup(db):
         ("cgst", "REAL NOT NULL DEFAULT 0"),
         ("sgst", "REAL NOT NULL DEFAULT 0"),
         ("igst", "REAL NOT NULL DEFAULT 0"),
+        ("inventory_unit_cost", "REAL NOT NULL DEFAULT 0"),
+        ("inventory_cost_total", "REAL NOT NULL DEFAULT 0"),
+        ("costing_status", "TEXT NOT NULL DEFAULT 'pending'"),
     ):
         if name not in item_columns:
             db.execute(f"ALTER TABLE sale_invoice_items ADD COLUMN {name} {definition}")
@@ -230,15 +233,26 @@ def create_sale(
     mode = payload.payment_mode.lower().strip()
     if mode not in allowed_modes:
         raise HTTPException(status_code=400, detail="Invalid payment mode.")
+    if payload.paid_amount > 0 and mode in ("credit", "other"):
+        raise HTTPException(
+            status_code=400,
+            detail="For a paid sale, select cash, UPI, card or bank transfer. Credit is an outstanding balance."
+        )
 
     if not payload.items:
         raise HTTPException(status_code=400, detail="Add at least one product.")
 
     with tenant_connection(code) as db:
         setup(db)
-        from .finance import setup as finance_setup
+        from .finance import setup as finance_setup, post_journal, accounts_map
+        from .purchases import setup as purchases_setup
+        from .wac_engine import issue_inventory, WACError
+        purchases_setup(db)
         finance_setup(db)
         branch_id = get_branch(db)
+
+        # Commit setup/schema changes before opening the sale transaction.
+        db.commit()
         db.execute("BEGIN IMMEDIATE")
 
         try:
@@ -318,12 +332,31 @@ def create_sale(
                 if party:
                     customer_state = str(party["state_code"] or "").strip()
 
+            # Validate GST registration state codes before tax calculation.
+            GST_STATE_CODES = {
+                "01", "02", "03", "04", "05", "06", "07", "08", "09",
+                "10", "11", "12", "13", "14", "15", "16", "17", "18",
+                "19", "20", "21", "22", "23", "24", "26", "27", "29",
+                "30", "31", "32", "33", "34", "35", "36", "37", "38",
+                "97", "99",
+            }
+
+            if business_state not in GST_STATE_CODES:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Configure a valid 2-digit business GST state code before posting sales."
+                )
+
             # Walk-in customers default to the business state.
             place_of_supply = customer_state or business_state
-            intra_state = (
-                not business_state or not place_of_supply
-                or business_state.casefold() == place_of_supply.casefold()
-            )
+
+            if place_of_supply not in GST_STATE_CODES:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Configure a valid 2-digit GST state code for this customer before posting sales."
+                )
+
+            intra_state = business_state == place_of_supply
 
             # Allocate bill discount proportionately before calculating GST.
             factor = (subtotal - bill_discount) / subtotal if subtotal else 0
@@ -412,8 +445,9 @@ def create_sale(
             ))
             invoice_id = cursor.lastrowid
 
+            cogs_total = 0.0
             for line in calculated:
-                db.execute("""
+                item_cursor = db.execute("""
                     INSERT INTO sale_invoice_items (
                         invoice_id, product_id, product_name, sku,
                         quantity, unit_price, gst_rate, discount_percent,
@@ -427,6 +461,38 @@ def create_sale(
                     line["gst"], line["total"], line["hsn_code"],
                     line["cgst"], line["sgst"], line["igst"]
                 ))
+
+                sale_item_id = item_cursor.lastrowid
+                try:
+                    cost_result = issue_inventory(
+                        db,
+                        movement_key=f"sale-invoice:{invoice_id}:item:{sale_item_id}",
+                        branch_id=branch_id,
+                        product_id=line["product_id"],
+                        quantity=line["quantity"],
+                        movement_type="sale",
+                        reference_type="sale_invoice",
+                        reference_id=invoice_id,
+                        reference_line_id=sale_item_id,
+                        notes=f"Sale {invoice_number}",
+                    )
+                except WACError as exc:
+                    raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+                # Persist the exact WAC cost captured at sale time.
+                db.execute("""
+                    UPDATE sale_invoice_items
+                    SET inventory_unit_cost=?,
+                        inventory_cost_total=?,
+                        costing_status='costed'
+                    WHERE id=?
+                """, (
+                    cost_result["issued_unit_cost"],
+                    cost_result["issued_cost_total"],
+                    sale_item_id,
+                ))
+
+                cogs_total = money(cogs_total + cost_result["issued_cost_total"])
 
                 new_stock = db.execute("""
                     SELECT quantity FROM stock_balances
@@ -459,6 +525,73 @@ def create_sale(
                 """, (
                     invoice_id, now, mode, paid, payload.payment_reference
                 ))
+
+            if grand_total > 0:
+                account_ids = accounts_map(db)
+                journal_lines = []
+
+                if paid > 0:
+                    receipt_account = (
+                        "Cash" if mode == "cash" else "Bank"
+                    )
+                    journal_lines.append({
+                        "account_id": account_ids[receipt_account],
+                        "debit": paid,
+                    })
+
+                if balance > 0:
+                    journal_lines.append({
+                        "account_id": account_ids["Accounts Receivable"],
+                        "debit": balance,
+                    })
+
+                if taxable_total > 0:
+                    journal_lines.append({
+                        "account_id": account_ids["Sales Revenue"],
+                        "credit": taxable_total,
+                    })
+
+                for amount, account_name in (
+                    (cgst_total, "Output CGST"),
+                    (sgst_total, "Output SGST"),
+                    (igst_total, "Output IGST"),
+                ):
+                    if amount > 0:
+                        journal_lines.append({
+                            "account_id": account_ids[account_name],
+                            "credit": amount,
+                        })
+
+                post_journal(
+                    db=db,
+                    voucher_date=invoice_date,
+                    voucher_type="SALES",
+                    narration=f"Sales invoice {invoice_number}",
+                    source_type="sale_invoice",
+                    source_id=invoice_id,
+                    lines=journal_lines,
+                )
+
+            if cogs_total > 0:
+                cost_accounts = accounts_map(db)
+                post_journal(
+                    db=db,
+                    voucher_date=invoice_date,
+                    voucher_type="COGS",
+                    narration=f"Cost of goods sold for {invoice_number}",
+                    source_type="sale_cogs",
+                    source_id=invoice_id,
+                    lines=[
+                        {
+                            "account_id": cost_accounts["Cost of Goods Sold"],
+                            "debit": cogs_total,
+                        },
+                        {
+                            "account_id": cost_accounts["Inventory"],
+                            "credit": cogs_total,
+                        },
+                    ],
+                )
 
             db.commit()
         except Exception:

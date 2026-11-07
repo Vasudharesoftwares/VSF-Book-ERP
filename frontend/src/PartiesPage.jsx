@@ -477,6 +477,8 @@ function SupplierPartiesPage({ tenant, type }) {
             <thead>
               <tr>
                 <th>Record</th>
+                <th>Supplier Payable</th>
+                <th>Supplier Credit</th>
                 <th>Created date</th>
               </tr>
             </thead>
@@ -484,12 +486,14 @@ function SupplierPartiesPage({ tenant, type }) {
               {items.map(item => (
                 <tr key={item.id}>
                   <td className="party-record">{item.name || `${singular} #${item.id}`}</td>
+                  <td>₹{Number(item.payable_balance || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                  <td>₹{Number(item.supplier_credit || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
                   <td>{item.created_at || "—"}</td>
                 </tr>
               ))}
               {!items.length && (
                 <tr>
-                  <td colSpan="2" className="party-empty">
+                  <td colSpan="4" className="party-empty">
                     {loading ? "Loading records..." : "No records found."}
                   </td>
                 </tr>

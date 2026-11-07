@@ -1,4 +1,7 @@
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&display=swap');
+@import "tailwindcss";
+
+
 :root{font-family:'DM Sans',sans-serif;color:#202b26;background:#f5f7f6;--green:#16865d;--dark:#116c4a;--pale:#eaf5ef;--muted:#7c8982;--border:#e8eeea}
 *{box-sizing:border-box}body{margin:0;min-width:320px}button{font:inherit}
 .sidebar{width:258px;position:fixed;inset:0 auto 0 0;z-index:5;background:#fff;border-right:1px solid var(--border);display:flex;flex-direction:column;padding:23px 16px 15px}
@@ -250,3 +253,195 @@ input:focus, select:focus, textarea:focus {
 .purchase-module .form-grid input:focus,.purchase-module .form-grid select:focus{outline:2px solid #b8ddc5;border-color:#21864e}
 .purchase-hint{margin-top:14px}
 @media(max-width:600px){.purchase-toolbar{align-items:flex-start;flex-direction:column}.purchase-tabs{gap:6px}.purchase-tab{font-size:11px;padding:8px 10px}}
+
+/* Reports & BI */
+.reports-page{min-width:0}
+.reports-filter{margin-bottom:16px}
+.reports-filter-title{display:flex;align-items:center;justify-content:space-between;margin-bottom:17px;color:#34443a}
+.reports-filter-title>div{display:flex;align-items:center;gap:9px;color:var(--green)}
+.reports-filter-title b{font-size:14px}
+.reports-filter-title>span{font-size:11px;color:var(--muted)}
+.reports-controls{display:grid;grid-template-columns:minmax(190px,2fr) minmax(140px,1fr) minmax(140px,1fr) auto;gap:12px;align-items:end}
+.reports-controls label{display:flex;flex-direction:column;gap:7px;color:#536258;font-size:12px;font-weight:600}
+.reports-controls input,.reports-controls select{width:100%;min-width:0;min-height:40px;padding:9px 10px;border:1px solid #dce5df;border-radius:8px;background:#fff;color:#26372d;font:inherit;font-size:12px}
+.reports-controls input:disabled{background:#f4f6f4;color:#9aa59f}
+.reports-controls button{min-height:40px;white-space:nowrap}
+.reports-note{margin:12px 0 0;color:#87938b;font-size:11px}
+.reports-stats{margin:16px 0}
+.reports-table-panel{margin-top:16px}
+.reports-actions{display:flex;gap:8px;flex-wrap:wrap}
+.reports-actions button{padding:8px 11px;font-size:11px}
+.reports-table{min-width:680px}
+.reports-disclaimer{font-size:11px;line-height:1.6;color:#89958d;margin:12px 2px}
+@media(max-width:850px){.reports-controls{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:520px){.reports-controls{grid-template-columns:1fr}.reports-filter-title{align-items:flex-start;gap:8px;flex-direction:column}.reports-actions{width:100%}}
+@media print{.sidebar,.topbar,.reports-filter,.reports-actions,.reports-disclaimer{display:none!important}.main-area{margin:0}.page-content{padding:0}.reports-table-panel{border:0}.reports-table{white-space:normal;min-width:0}.reports-table th,.reports-table td{font-size:9px;padding:6px}}
+
+
+
+/* VSF PREMIUM ERP DESIGN UPGRADE */
+:root {
+  --vsf-green: #168653;
+  --vsf-green-dark: #106b43;
+  --vsf-green-soft: #eaf5ef;
+  --vsf-bg: #f4f7f5;
+  --vsf-surface: #ffffff;
+  --vsf-border: #e2eae5;
+  --vsf-text: #24332b;
+  --vsf-muted: #718078;
+  --vsf-danger: #c83e3e;
+  --vsf-radius: 13px;
+  --vsf-shadow: 0 3px 14px rgba(27, 62, 43, .045);
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background: var(--vsf-bg);
+  color: var(--vsf-text);
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI",
+               sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+button, input, select, textarea {
+  font: inherit;
+}
+
+button {
+  border-radius: 9px;
+  transition: background .18s ease, border-color .18s ease,
+              box-shadow .18s ease, transform .18s ease;
+  cursor: pointer;
+}
+
+button:hover {
+  filter: brightness(.97);
+}
+
+button:active {
+  transform: translateY(1px);
+}
+
+input:not([type="checkbox"]):not([type="radio"]),
+select,
+textarea {
+  min-height: 42px;
+  border: 1px solid #d8e3dc;
+  border-radius: 9px;
+  background: #fff;
+  color: var(--vsf-text);
+  padding: 10px 12px;
+  outline: none;
+  transition: border-color .18s ease, box-shadow .18s ease;
+  box-sizing: border-box;
+  max-width: 100%;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--vsf-green) !important;
+  box-shadow: 0 0 0 3px rgba(22, 134, 83, .11);
+}
+
+label {
+  color: #52645a;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  background: var(--vsf-surface);
+  border: 1px solid var(--vsf-border);
+  border-radius: 11px;
+  overflow: hidden;
+}
+
+table th {
+  background: #f3f7f4;
+  color: #637269;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .045em;
+  text-transform: uppercase;
+  padding: 13px 15px;
+  text-align: left;
+}
+
+table td {
+  padding: 13px 15px;
+  border-top: 1px solid #edf1ee;
+  color: #35453b;
+  font-size: 13px;
+}
+
+table tbody tr:hover {
+  background: #f8fbf9;
+}
+
+aside,
+[class*="sidebar"],
+[class*="Sidebar"] {
+  background: #fff;
+  border-color: var(--vsf-border);
+}
+
+main {
+  background: var(--vsf-bg);
+}
+
+[class*="card"],
+[class*="Card"],
+[class*="panel"],
+[class*="Panel"] {
+  border-color: var(--vsf-border);
+  border-radius: var(--vsf-radius);
+  box-shadow: var(--vsf-shadow);
+}
+
+h1, h2, h3, h4 {
+  color: var(--vsf-text);
+  letter-spacing: -.025em;
+}
+
+h1 {
+  font-weight: 750;
+}
+
+h2, h3 {
+  font-weight: 700;
+}
+
+small,
+[class*="muted"],
+[class*="Muted"] {
+  color: var(--vsf-muted);
+}
+
+button:focus-visible,
+a:focus-visible {
+  outline: 3px solid rgba(22, 134, 83, .28);
+  outline-offset: 2px;
+}
+
+@media (max-width: 768px) {
+  input:not([type="checkbox"]):not([type="radio"]),
+  select,
+  textarea {
+    width: 100%;
+  }
+
+  table {
+    display: block;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+}
+/* END VSF PREMIUM ERP DESIGN UPGRADE */

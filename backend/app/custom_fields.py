@@ -53,11 +53,25 @@ class CustomFieldReorder(BaseModel):
 class CustomFieldValues(BaseModel):
     values: dict[str, object]
 
+def ensure_custom_field_archive_column(db):
+    """Safely add the archive flag without deleting historical data."""
+    columns = {
+        row["name"]
+        for row in db.execute("PRAGMA table_info(custom_field_definitions)").fetchall()
+    }
+    if "is_archived" not in columns:
+        db.execute(
+            "ALTER TABLE custom_field_definitions "
+            "ADD COLUMN is_archived INTEGER NOT NULL DEFAULT 0"
+        )
+
+
 def field_dict(row):
     item = dict(row)
     item["options"] = json.loads(item.pop("options_json") or "[]")
     item["is_required"] = bool(item["is_required"])
     item["is_active"] = bool(item["is_active"])
+    item["is_archived"] = bool(item.get("is_archived", 0))
     return item
 
 def check_field_type(field_type, options):
@@ -75,9 +89,10 @@ def get_custom_fields(
     if module_key not in MODULES:
         raise HTTPException(status_code=400, detail="Invalid module.")
     with tenant_connection(code) as db:
+        ensure_custom_field_archive_column(db)
         rows = db.execute(
             """SELECT * FROM custom_field_definitions
-               WHERE module_key=? ORDER BY sort_order, id""",
+               WHERE module_key=? AND COALESCE(is_archived, 0)=0 ORDER BY sort_order, id""",
             (module_key,)
         ).fetchall()
     return {"module_key": module_key, "fields": [field_dict(r) for r in rows]}
@@ -93,9 +108,34 @@ def create_custom_field(
     check_field_type(payload.field_type, payload.options)
     if module not in MODULES:
         raise HTTPException(status_code=400, detail="Invalid module.")
-    key = cf_key(label)
+    base_key = cf_key(label)
+    key = base_key
     options = [str(x).strip() for x in payload.options if str(x).strip()]
     with tenant_connection(code) as db:
+        ensure_custom_field_archive_column(db)
+
+        existing = db.execute(
+            "SELECT is_archived FROM custom_field_definitions "
+            "WHERE module_key=? AND field_key=?",
+            (module, key)
+        ).fetchone()
+
+        if existing and not existing["is_archived"]:
+            raise HTTPException(
+                status_code=409,
+                detail="A field with this name already exists in this module."
+            )
+
+        suffix = 2
+        while existing:
+            key = f"{base_key[:55]}_{suffix}"
+            existing = db.execute(
+                "SELECT id FROM custom_field_definitions "
+                "WHERE module_key=? AND field_key=?",
+                (module, key)
+            ).fetchone()
+            suffix += 1
+
         try:
             cursor = db.execute(
                 """INSERT INTO custom_field_definitions
@@ -120,45 +160,6 @@ def create_custom_field(
         ).fetchone()
     return {"message": "Custom field created.", "field": field_dict(row)}
 
-@router.put("/custom-fields/{field_id}")
-def update_custom_field(
-    field_id: int,
-    payload: CustomFieldUpdate,
-    x_tenant_code: Optional[str] = Header(default=None)
-):
-    code = cf_tenant(x_tenant_code)
-    data = payload.model_dump(exclude_unset=True)
-    if not data:
-        raise HTTPException(status_code=400, detail="No changes supplied.")
-    if "field_type" in data:
-        check_field_type(data["field_type"], data.get("options", []))
-    if "options" in data:
-        data["options_json"] = json.dumps(data.pop("options"))
-    if "is_required" in data:
-        data["is_required"] = int(data["is_required"])
-    if "is_active" in data:
-        data["is_active"] = int(data["is_active"])
-    data["updated_at"] = "CURRENT_TIMESTAMP"
-    assignments = []
-    values = []
-    for key, value in data.items():
-        if key == "updated_at":
-            assignments.append("updated_at=CURRENT_TIMESTAMP")
-        else:
-            assignments.append(f"{key}=?")
-            values.append(value)
-    values.append(field_id)
-    with tenant_connection(code) as db:
-        cursor = db.execute(
-            f"UPDATE custom_field_definitions SET {','.join(assignments)} WHERE id=?",
-            values
-        )
-        if not cursor.rowcount:
-            raise HTTPException(status_code=404, detail="Field not found.")
-        row = db.execute(
-            "SELECT * FROM custom_field_definitions WHERE id=?", (field_id,)
-        ).fetchone()
-    return {"message": "Custom field updated.", "field": field_dict(row)}
 
 @router.put("/custom-fields/reorder")
 def reorder_custom_fields(
@@ -170,9 +171,11 @@ def reorder_custom_fields(
     if module_key not in MODULES:
         raise HTTPException(status_code=400, detail="Invalid module.")
     with tenant_connection(code) as db:
+        ensure_custom_field_archive_column(db)
         existing = {
             row["id"] for row in db.execute(
-                "SELECT id FROM custom_field_definitions WHERE module_key=?",
+                "SELECT id FROM custom_field_definitions WHERE module_key=? "
+                "AND COALESCE(is_archived, 0)=0",
                 (module_key,)
             ).fetchall()
         }
@@ -189,6 +192,103 @@ def reorder_custom_fields(
                 (position, field_id, module_key)
             )
     return {"message": "Field order saved."}
+
+
+@router.put("/custom-fields/{field_id}")
+def update_custom_field(
+    field_id: int,
+    payload: CustomFieldUpdate,
+    x_tenant_code: Optional[str] = Header(default=None)
+):
+    code = cf_tenant(x_tenant_code)
+    data = payload.model_dump(exclude_unset=True)
+    if not data:
+        raise HTTPException(status_code=400, detail="No changes supplied.")
+
+    with tenant_connection(code) as db:
+        ensure_custom_field_archive_column(db)
+        existing = db.execute(
+            "SELECT * FROM custom_field_definitions WHERE id=?",
+            (field_id,)
+        ).fetchone()
+        if not existing or existing["is_archived"]:
+            raise HTTPException(status_code=404, detail="Field not found.")
+
+        effective_type = data.get("field_type", existing["field_type"])
+        effective_options = data.get(
+            "options", json.loads(existing["options_json"] or "[]")
+        )
+        if "options" in data:
+            effective_options = [
+                str(x).strip() for x in data["options"] if str(x).strip()
+            ]
+        check_field_type(effective_type, effective_options)
+
+        if "label" in data:
+            data["label"] = data["label"].strip()
+            if not data["label"]:
+                raise HTTPException(
+                    status_code=400, detail="Field label cannot be blank."
+                )
+
+        if "options" in data:
+            data["options_json"] = json.dumps(effective_options)
+            del data["options"]
+
+        if "is_required" in data:
+            data["is_required"] = int(data["is_required"])
+        if "is_active" in data:
+            data["is_active"] = int(data["is_active"])
+
+        assignments = []
+        values = []
+        for key, value in data.items():
+            assignments.append(f"{key}=?")
+            values.append(value)
+
+        assignments.append("updated_at=CURRENT_TIMESTAMP")
+        values.append(field_id)
+
+        db.execute(
+            f"UPDATE custom_field_definitions SET {','.join(assignments)} WHERE id=?",
+            values
+        )
+        row = db.execute(
+            "SELECT * FROM custom_field_definitions WHERE id=?", (field_id,)
+        ).fetchone()
+
+    return {"message": "Custom field updated.", "field": field_dict(row)}
+
+
+@router.delete("/custom-fields/{field_id}")
+def delete_custom_field(
+    field_id: int,
+    x_tenant_code: Optional[str] = Header(default=None)
+):
+    code = cf_tenant(x_tenant_code)
+    with tenant_connection(code) as db:
+        ensure_custom_field_archive_column(db)
+
+        field = db.execute(
+            "SELECT id, is_archived FROM custom_field_definitions WHERE id=?",
+            (field_id,)
+        ).fetchone()
+
+        if not field:
+            raise HTTPException(status_code=404, detail="Field not found.")
+
+        if not field["is_archived"]:
+            db.execute(
+                """UPDATE custom_field_definitions
+                   SET is_archived=1, is_active=0,
+                       updated_at=CURRENT_TIMESTAMP
+                   WHERE id=?""",
+                (field_id,)
+            )
+
+    return {
+        "message": "Custom field removed from active forms. Historical data preserved."
+    }
 
 @router.get("/custom-field-values/{module_key}/{entity_id}")
 def get_custom_field_values(
@@ -227,9 +327,10 @@ def save_custom_field_values(
     if module_key not in MODULES:
         raise HTTPException(status_code=400, detail="Invalid module.")
     with tenant_connection(code) as db:
+        ensure_custom_field_archive_column(db)
         definitions = db.execute(
             """SELECT * FROM custom_field_definitions
-               WHERE module_key=? AND is_active=1""",
+               WHERE module_key=? AND is_active=1 AND COALESCE(is_archived, 0)=0""",
             (module_key,)
         ).fetchall()
         by_key = {row["field_key"]: row for row in definitions}
